@@ -36,10 +36,29 @@ execution_metrics = sa.Table(
     sa.PrimaryKeyConstraint('id')
 )
 
+TABLE = 'evo_agent_processor_execution_metrics'
+
+
+def _table_exists() -> bool:
+    return op.get_bind().execute(
+        sa.text("SELECT to_regclass(:t)"), {"t": TABLE}
+    ).scalar() is not None
+
+
 def upgrade() -> None:
-    """Upgrade schema."""
+    """Upgrade schema.
+
+    Idempotent (CRM-543): on a database where this table already exists —
+    created by a prior run, or by ``Base.metadata.create_all`` on an older image
+    — while this alembic's ``alembic_version`` is empty, a bare ``CREATE TABLE``
+    raises ``DuplicateTable`` and crash-loops the processor boot before it ever
+    reaches ``create_all``/the enterprise chain. Skip the create when the table
+    is already there; the revision is still stamped, reconciling the drift.
+    """
+    if _table_exists():
+        return
     op.create_table(
-        'evo_agent_processor_execution_metrics',
+        TABLE,
         sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('agent_id', postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column('session_id', sa.String(), nullable=False),
@@ -56,5 +75,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
-    op.drop_table('evo_agent_processor_execution_metrics')
+    """Downgrade schema. Idempotent for symmetry with upgrade (CRM-543)."""
+    if _table_exists():
+        op.drop_table(TABLE)
