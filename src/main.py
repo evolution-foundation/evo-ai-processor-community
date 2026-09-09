@@ -41,8 +41,7 @@ from src.middleware.rate_limit import GlobalRateLimitMiddleware, RateLimitMiddle
 from src.services.otel_config import setup_otel
 from src.services.permission_service import initialize_permission_service
 from src.middleware.evo_auth import EvoAuthMiddleware
-from src.evo_extension_points import runtime_context
-from starlette.requests import Request as StarletteRequest
+from src.middleware.tenant_context import TenantContextMiddleware
 from fastapi.exceptions import HTTPException
 from src.core.exceptions import BaseAPIException
 from src.core.exception_handlers import (
@@ -105,73 +104,7 @@ app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(BaseAPIException, base_api_exception_handler)
 
 
-class TenantContextMiddleware:
-    """Bind the per-request operational context (tenant) via the runtime_context
-    extension point, so downstream lazy DB transactions see the correct tenant GUC.
-
-    Why a PURE ASGI middleware (NOT BaseHTTPMiddleware):
-      BaseHTTPMiddleware runs the downstream app in a separate anyio task via a
-      memory stream. That task boundary means any ContextVar set here (which is
-      how the enterprise runtime_context impl propagates the tenant, and how
-      SQLAlchemy's lazy transaction later reads it) would NOT be visible where the
-      DB session actually opens its connection — the bind would silently no-op.
-      A pure ASGI middleware calls ``self.app(...)`` in the SAME task, so the
-      ContextVar set by ``bind_context`` stays live all the way down to the lazy
-      transaction. This is the same reason the SQLAlchemy/tenant docs warn against
-      BaseHTTPMiddleware for context propagation.
-
-    Why the ordering (this must run AFTER EvoAuth on the inbound path):
-      ``current_context_id`` resolves the tenant from ``request.state.user_context``,
-      which EvoAuthMiddleware populates. In Starlette the LAST ``add_middleware`` is
-      the OUTERMOST (runs first inbound). So to be MORE INTERNAL than EvoAuth (i.e.
-      run after it inbound), this middleware is added BEFORE EvoAuth's
-      ``add_middleware`` call below. Flow: EvoAuth populates user_context first,
-      then this middleware reads it and binds the tenant.
-    """
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        try:
-            request = StarletteRequest(scope, receive)
-            cid = runtime_context.current_context_id(request)
-        except Exception as e:
-            # Fail-open: never drop a request because context resolution blew up.
-            # Community default has no tenant anyway (single-scope); a failure here
-            # must degrade to "no tenant bound", not a 500.
-            logger.warning(f"TenantContextMiddleware: context resolution failed: {e}")
-            cid = None
-
-        if not cid:
-            await self.app(scope, receive, send)
-            return
-
-        # Fail-open on the BIND SETUP only, never on the downstream app. If entering
-        # ``bind_context`` blows up we fall back to running the app unbound
-        # (community-default = no tenant) instead of 500-ing. But once the app has
-        # started, its exceptions must propagate untouched: catching them here would
-        # both swallow real errors AND risk running the app twice (a second response
-        # on the same send channel). ``app_started`` guards that boundary.
-        app_started = False
-        try:
-            async with runtime_context.bind_context(cid):
-                app_started = True
-                await self.app(scope, receive, send)
-        except Exception as e:
-            if app_started:
-                raise
-            logger.warning(f"TenantContextMiddleware: bind_context failed: {e}")
-            await self.app(scope, receive, send)
-
-
-# Tenant-context middleware — added BEFORE EvoAuth so it is MORE INTERNAL
-# (runs AFTER EvoAuth inbound, once request.state.user_context exists). See the
-# class docstring for the ordering + pure-ASGI rationale.
+# Before EvoAuth on purpose: it must run after EvoAuth inbound.
 app.add_middleware(TenantContextMiddleware)
 
 # EvoAuth middleware for authentication and user context
