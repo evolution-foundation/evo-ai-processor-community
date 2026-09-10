@@ -39,6 +39,7 @@ from src.utils.logger import setup_logger
 from src.core.exceptions import AgentNotFoundError
 from src.services.agent_service import get_agent
 from src.services.adk.agent_builder import AgentBuilder
+from src.services.adk.runners.audio_transcription import transcribe_audio_file
 from src.utils.adk_utils import extract_state_params
 from sqlalchemy.orm import Session
 from typing import Optional, List, Tuple, Dict, Any, Union
@@ -294,31 +295,60 @@ class RunnerUtils:
                         )
                     )
 
-                    # EVO-2181: add the file to the content parts so the model
-                    # actually receives it. This append used to be gated behind
-                    # `if is_audio`, so an image was blobbed and saved to the
-                    # artifact store but never handed to the LLM -> the agent
-                    # replied "No content to process".
-                    #
-                    # It runs before save_artifact on purpose: the bytes are
-                    # already in hand, and a failure while storing them must not
-                    # cost the model its copy of the file and bring this very bug
-                    # back.
-                    skip_reason = self._inline_skip_reason(
-                        file_data.content_type, len(file_bytes), inlined_bytes
-                    )
-                    if skip_reason:
-                        logger.warning(
-                            f"File {file_data.filename} ({file_data.content_type}) not sent"
-                            f" to the model: {skip_reason}. Still saved as an artifact."
+                    if is_audio:
+                        # EVO-2227 (Fase 2): audio never travels as a raw model
+                        # part. google-adk 1.19.0 emits an `audio_url` content
+                        # part for audio and litellm 1.68.2 rejects it (not in
+                        # ValidUserMessageContentTypes) -> a 500 that costs the
+                        # whole turn. Instead transcribe it with the agent's own
+                        # multimodal model and let the text stand in, so ANY
+                        # answering LLM understands the voice note. Best-effort:
+                        # a None transcript leaves the turn on its remaining text.
+                        transcript = await transcribe_audio_file(
+                            getattr(self, "db", None),
+                            agent_id,
+                            file_data.content_type,
+                            file_data.filename,
+                            file_data.data,
                         )
+                        if transcript:
+                            transcribed_texts.append(transcript)
+                            logger.info(
+                                f"Transcribed audio {file_data.filename}"
+                                f" ({file_data.content_type}); text stands in for the file"
+                            )
+                        else:
+                            logger.warning(
+                                f"Audio {file_data.filename} could not be transcribed;"
+                                f" the turn continues on its remaining text"
+                            )
                     else:
-                        inlined_bytes += len(file_bytes)
-                        file_parts.append(file_part)
-                        logger.info(
-                            f"Added {'audio' if is_audio else 'file'} {file_data.filename}"
-                            f" ({file_data.content_type}) to content parts for LLM processing"
+                        # EVO-2181: add readable non-audio media (image/pdf/text/
+                        # video) to the content parts so the model actually
+                        # receives it. This append used to be gated behind
+                        # `if is_audio`, so an image was blobbed and saved to the
+                        # artifact store but never handed to the LLM -> the agent
+                        # replied "No content to process".
+                        #
+                        # It runs before save_artifact on purpose: the bytes are
+                        # already in hand, and a failure while storing them must
+                        # not cost the model its copy of the file and bring this
+                        # very bug back.
+                        skip_reason = self._inline_skip_reason(
+                            file_data.content_type, len(file_bytes), inlined_bytes
                         )
+                        if skip_reason:
+                            logger.warning(
+                                f"File {file_data.filename} ({file_data.content_type}) not sent"
+                                f" to the model: {skip_reason}. Still saved as an artifact."
+                            )
+                        else:
+                            inlined_bytes += len(file_bytes)
+                            file_parts.append(file_part)
+                            logger.info(
+                                f"Added file {file_data.filename}"
+                                f" ({file_data.content_type}) to content parts for LLM processing"
+                            )
 
                     # Always save to artifacts for reference
                     await artifacts_service.save_artifact(

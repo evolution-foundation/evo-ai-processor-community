@@ -405,6 +405,41 @@ async def update_current_time(callback_context: CallbackContext):
     callback_context.state["_datetime"] = now.isoformat()
 
 
+async def strip_unsupported_audio_from_history(callback_context, llm_request):
+    """EVO-2227: drop raw audio parts from the outgoing LLM request.
+
+    Audio is transcribed upstream (RunnerUtils.process_files) and never sent as a
+    model part on new turns. But conversations that received audio BEFORE that fix
+    persisted user events carrying the raw audio Blob; google-adk 1.19.0 turns
+    those into an ``audio_url`` content part and litellm 1.68.2 rejects it (not in
+    ValidUserMessageContentTypes) -> a 500 that breaks EVERY later turn in the
+    conversation, audio or text. This before_model_callback sanitizes the request
+    so a poisoned history can't kill the turn; the turn's text (e.g. the original
+    caption) is kept, only the audio bytes are dropped.
+    """
+    contents = getattr(llm_request, "contents", None) or []
+    for content in contents:
+        parts = getattr(content, "parts", None)
+        if not parts:
+            continue
+        kept = []
+        dropped = False
+        for part in parts:
+            inline = getattr(part, "inline_data", None)
+            mime = (getattr(inline, "mime_type", "") or "") if inline else ""
+            if mime.lower().startswith("audio/"):
+                dropped = True
+                continue
+            kept.append(part)
+        if dropped:
+            if not kept:
+                from google.genai import types
+
+                kept = [types.Part(text="[audio]")]
+            content.parts = kept
+    return None
+
+
 async def advanced_usage_tracker(
     callback_context: CallbackContext, llm_response: LlmResponse
 ) -> Optional[LlmResponse]:
@@ -1218,6 +1253,9 @@ class LlmAgentBuilder:
             "description": agent.description,
             "tools": all_tools,
             "before_agent_callback": combined_callback,
+            # EVO-2227: sanitize any raw audio left in a pre-fix session history so
+            # it can't 500 the turn (google-adk audio_url part -> litellm reject).
+            "before_model_callback": strip_unsupported_audio_from_history,
             # "after_model_callback": advanced_usage_tracker,
         }
 
