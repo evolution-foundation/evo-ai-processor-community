@@ -5,12 +5,32 @@ This tool allows agents to transfer conversations to human agents,
 following transfer rules and best practices.
 """
 
-from typing import Optional, Dict, Any, List
+import re
+from typing import Optional, Dict, Any, List, Set
 from google.adk.tools import FunctionTool, ToolContext
 from src.services.adk.tools.evo_crm.base import EvoCrmClient
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+# Common PT/EN words that appear in almost any transfer-rule instructions or
+# reason text (articles, prepositions, generic customer-service vocabulary).
+# Excluding them prevents a coincidental match on e.g. "cliente"/"para"/
+# "informações" from selecting an unrelated rule (EVO-2247).
+_STOPWORDS: Set[str] = {
+    "para", "sobre", "quando", "cliente", "solicitar", "informações",
+    "informacoes", "assuntos", "outros", "relacionados", "pedir", "pediu",
+    "quiser", "envie", "mensagem", "antes", "trasnferir", "transferir",
+    "instant", "the", "and", "for", "with", "about", "customer", "when",
+    "requests", "requested", "other", "related", "issues", "before",
+}
+
+
+def _tokenize(text: str) -> Set[str]:
+    """Lowercase word tokens (letters only, length > 3) from free text."""
+    return {word for word in _WORD_RE.findall(text.lower()) if len(word) > 3}
 
 
 def _extract_conversation_id_from_metadata(tool_context: Optional[ToolContext]) -> Optional[str]:
@@ -87,7 +107,9 @@ def create_transfer_to_human_tool(
         assignee_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         team_id: Optional[str] = None,
+        rule_index: Optional[int] = None,
         reason: Optional[str] = None,
+        message_to_customer: Optional[str] = None,
         tool_context: Optional[ToolContext] = None,
     ) -> Dict[str, Any]:
         """Transfer a conversation to a human agent.
@@ -154,21 +176,86 @@ def create_transfer_to_human_tool(
             effective_team_id = team_id
             
             if not effective_assignee_id and not effective_team_id and available_transfer_rules:
-                # Use the first transfer rule that matches "human" or "team"
-                # In the future, this could be enhanced to evaluate rule conditions
-                for rule in available_transfer_rules:
-                    if rule.get("transferTo") == "human" and rule.get("userId"):
-                        effective_assignee_id = rule.get("userId")
+                # An explicit rule_index that doesn't resolve to a configured
+                # rule is a contract failure, not "no preference" — report it
+                # instead of silently falling through to keyword matching or
+                # the first rule, which would hide the model's mistake behind
+                # a transfer to a possibly-wrong team.
+                if rule_index is not None and not (1 <= rule_index <= len(available_transfer_rules)):
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"rule_index {rule_index} is out of range — this agent has "
+                            f"{len(available_transfer_rules)} configured transfer rule(s), "
+                            f"numbered 1-{len(available_transfer_rules)}."
+                        ),
+                        "conversation_id": effective_conversation_id,
+                    }
+
+                selected_rule = None
+
+                # Preferred path: the model picked a specific rule from the
+                # numbered list in its own docstring (see transfer_rules_doc).
+                if rule_index is not None:
+                    selected_rule = available_transfer_rules[rule_index - 1]
+                    logger.info(f"Using transfer rule #{rule_index} selected by the model")
+
+                # No explicit index: previously this silently fell back to
+                # "the first rule with a valid team/user", which routed EVERY
+                # transfer to whichever rule happened to be listed first,
+                # regardless of the actual reason (EVO-2247). Instead, score
+                # each rule by how many meaningful (non-stopword) keywords it
+                # shares with the reason, and take the best-scoring rule —
+                # not just the first one with any overlap at all, since a
+                # single generic word (e.g. "cliente", "para") appearing in
+                # an unrelated rule's instructions would otherwise misroute.
+                if selected_rule is None and reason:
+                    reason_words = {
+                        word for word in _tokenize(reason) if word not in _STOPWORDS
+                    }
+                    best_rule = None
+                    best_score = 0
+                    for rule in available_transfer_rules:
+                        instruction_words = {
+                            word for word in _tokenize(rule.get("instructions") or "")
+                            if word not in _STOPWORDS
+                        }
+                        score = len(reason_words & instruction_words)
+                        if score > best_score:
+                            best_score = score
+                            best_rule = rule
+                    if best_rule is not None:
+                        selected_rule = best_rule
+                        logger.info(
+                            f"Matched transfer rule by keyword overlap "
+                            f"(score={best_score}) between reason and instructions"
+                        )
+
+                if selected_rule is None:
+                    selected_rule = next(
+                        (
+                            rule for rule in available_transfer_rules
+                            if (rule.get("transferTo") == "human" and rule.get("userId"))
+                            or (rule.get("transferTo") == "team" and rule.get("teamId"))
+                        ),
+                        None,
+                    )
+                    if selected_rule:
+                        logger.warning(
+                            "No rule_index and no keyword match against instructions — "
+                            "falling back to the first configured rule. The caller should "
+                            "pass rule_index to avoid misrouting."
+                        )
+
+                if selected_rule:
+                    if selected_rule.get("transferTo") == "human" and selected_rule.get("userId"):
+                        effective_assignee_id = selected_rule.get("userId")
                         logger.info(f"Using transfer rule to assign to user {effective_assignee_id}")
-                        if rule.get("instructions"):
-                            reason = reason or rule.get("instructions")
-                        break
-                    elif rule.get("transferTo") == "team" and rule.get("teamId"):
-                        effective_team_id = rule.get("teamId")
+                    elif selected_rule.get("transferTo") == "team" and selected_rule.get("teamId"):
+                        effective_team_id = selected_rule.get("teamId")
                         logger.info(f"Using transfer rule to assign to team {effective_team_id}")
-                        if rule.get("instructions"):
-                            reason = reason or rule.get("instructions")
-                        break
+                    if selected_rule.get("instructions"):
+                        reason = reason or selected_rule.get("instructions")
             
             # Validate that we have either assignee_id or team_id
             if not effective_assignee_id and not effective_team_id:
@@ -183,7 +270,39 @@ def create_transfer_to_human_tool(
                 + (f" (team: {effective_team_id})" if effective_team_id else "")
                 + (f" - Reason: {reason}" if reason else "")
             )
-            
+
+            # Send the customer-facing notice BEFORE assigning, so it doesn't
+            # depend on the model also producing text in the same turn (it
+            # often doesn't when it's already decided to call tools) — every
+            # transfer rule's own instructions say to notify the customer
+            # first, so make that guaranteed rather than hoped-for (EVO-2249).
+            message_send_error = None
+            if message_to_customer and message_to_customer.strip():
+                formatted_message = message_to_customer.strip()
+                if not formatted_message.startswith("<"):
+                    formatted_message = f"<p>{formatted_message}</p>"
+                try:
+                    await client.post(
+                        endpoint=f"/conversations/{effective_conversation_id}/messages",
+                        json_data={
+                            "content": formatted_message,
+                            "message_type": "outgoing",
+                            "private": False,
+                        },
+                    )
+                    logger.info(
+                        f"Sent customer-facing transfer notice to conversation {effective_conversation_id}"
+                    )
+                except Exception as message_error:
+                    # Don't block the transfer on a failed notice — better the
+                    # customer gets routed without the message than not routed
+                    # at all — but surface the failure in the result.
+                    message_send_error = str(message_error)
+                    logger.error(
+                        f"Failed to send transfer notice to conversation "
+                        f"{effective_conversation_id}: {message_send_error}"
+                    )
+
             # Prepare request body
             request_body: Dict[str, Any] = {}
             
@@ -233,7 +352,13 @@ def create_transfer_to_human_tool(
                 
                 if reason:
                     success_message += f". Reason: {reason}"
-                
+
+                message_to_customer_sent = bool(message_to_customer) and not message_send_error
+                if message_to_customer_sent:
+                    success_message += ". Customer was notified before the transfer."
+                elif message_send_error:
+                    success_message += f". WARNING: failed to notify the customer first: {message_send_error}"
+
                 return {
                     "status": "success",
                     "message": success_message,
@@ -241,6 +366,8 @@ def create_transfer_to_human_tool(
                     "assignee_id": effective_assignee_id,
                     "team_id": effective_team_id,
                     "reason": reason,
+                    "message_to_customer_sent": message_to_customer_sent,
+                    "message_to_customer_error": message_send_error,
                     "details": response,
                 }
                 
@@ -290,7 +417,7 @@ def create_transfer_to_human_tool(
     # Build docstring with transfer rules information
     transfer_rules_doc = ""
     if default_transfer_rules:
-        transfer_rules_doc = "\n\nConfigured Transfer Rules:\n"
+        transfer_rules_doc = "\n\nConfigured Transfer Rules (pass rule_index matching the one that fits):\n"
         for i, rule in enumerate(default_transfer_rules, 1):
             transfer_to = rule.get("transferTo", "unknown")
             instructions = rule.get("instructions", "")
@@ -303,21 +430,37 @@ def create_transfer_to_human_tool(
             if instructions:
                 transfer_rules_doc += f" ({instructions})"
             transfer_rules_doc += "\n"
-    
+
     transfer_to_human.__doc__ = f"""Transfer a conversation to a human agent.
-    
+
     Use this tool when the user requests human assistance, when complex issues require
     human expertise, or when escalation is needed based on transfer rules.
-    
-    If transfer_rules are configured, they will be used automatically. Otherwise,
-    you must provide assignee_id or team_id.{transfer_rules_doc}
-    
+
+    If transfer_rules are configured, you MUST pass rule_index set to the number of
+    whichever configured rule below actually matches what the user asked about — do
+    not omit it and rely on a default, there is no single "default" rule and omitting
+    it risks the wrong team. Otherwise, provide assignee_id or team_id
+    explicitly.{transfer_rules_doc}
+
+    IMPORTANT: if the matched rule's instructions say to notify the customer before
+    transferring (most do), you MUST pass message_to_customer with that notice — do
+    NOT rely on separately replying with text in the same turn, since when you call
+    tools you often don't also produce a customer-facing message, and the transfer
+    would then happen silently. Passing message_to_customer here guarantees it is
+    sent before the transfer, regardless of whether you also write reply text.
+
     Args:
         conversation_id: The ID of the conversation to transfer (optional, auto-extracted)
         assignee_id: The ID of the human agent to assign to (optional if transfer_rules configured)
         team_id: Optional team ID to assign to a team instead (optional if transfer_rules configured)
+        rule_index: The 1-based number of the configured transfer rule (above) that matches
+            this situation. Required whenever transfer_rules are configured and you are not
+            passing assignee_id/team_id explicitly.
         reason: Optional reason for transfer (for logging)
-    
+        message_to_customer: A short customer-facing message sent BEFORE the transfer
+            (e.g. "Vou te encaminhar para o Departamento X, só um instante."). Required
+            whenever the matched rule's instructions ask you to notify the customer first.
+
     Returns:
         Dictionary with transfer status and details
     """
