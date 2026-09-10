@@ -803,21 +803,32 @@ class LlmAgentBuilder:
             transfer_rules = agent.config.get("transfer_rules", [])
             if transfer_rules:
                 rules_text = []
-                for rule in transfer_rules:
+                for i, rule in enumerate(transfer_rules, 1):
                     if rule.get("transferTo") == "human" and rule.get("userId"):
                         user_name = rule.get("userName", "agent")
                         instructions = rule.get("instructions", "")
-                        rules_text.append(f"- Transfer to human ({user_name})" + (f": {instructions}" if instructions else ""))
+                        rules_text.append(f"{i}. Transfer to human ({user_name})" + (f": {instructions}" if instructions else ""))
                     elif rule.get("transferTo") == "team" and rule.get("teamId"):
                         team_name = rule.get("teamName", "team")
                         instructions = rule.get("instructions", "")
-                        rules_text.append(f"- Transfer to team ({team_name})" + (f": {instructions}" if instructions else ""))
-                
+                        rules_text.append(f"{i}. Transfer to team ({team_name})" + (f": {instructions}" if instructions else ""))
+
                 if rules_text:
+                    # EVO-2247: this used to say the tool applies rules
+                    # "automatically" and that assignee_id/team_id can be
+                    # omitted — that's exactly backwards. Without an explicit
+                    # rule_index (or a reason matching a rule's own
+                    # instructions), the tool has no reliable way to know
+                    # which configured rule applies, and previously defaulted
+                    # to always picking rule #1 regardless of topic.
                     crm_tools_instructions.append(
                         f"Transfer to Human Tool: Available. Use this tool when the user requests human assistance or when escalation is needed. "
                         f"Transfer rules configured: {'; '.join(rules_text)}. "
-                        f"The tool will automatically use the configured transfer rules, so you don't need to specify assignee_id or team_id unless overriding the rules."
+                        f"You MUST pass rule_index set to the number (above) of whichever rule actually "
+                        f"matches the situation — do not omit it, there is no reliable automatic default. "
+                        f"If that rule's instructions say to notify the customer before transferring, you "
+                        f"MUST also pass message_to_customer with that notice; do not rely on separately "
+                        f"replying with text, since tool calls often are not accompanied by reply text."
                     )
             else:
                 crm_tools_instructions.append(
