@@ -29,7 +29,19 @@ def normalize_model_for_provider(
     if provider != "openrouter":
         return model, {}
 
-    extra_kwargs = {"api_base": OPENROUTER_API_BASE}
+    # Bias OpenRouter's own routing toward the fastest available endpoint for
+    # this model, instead of its default "balanced" (price + speed) sort.
+    # `extra_body` is LiteLLM's documented mechanism for forwarding
+    # OpenRouter-specific request fields (see litellm/main.py, "we use
+    # openai 'extra_body' to pass openrouter specific params"). Added after
+    # an incident where a single generation on an otherwise reliable
+    # provider took ~104s and blew past the agent-run timeout —
+    # `sort: "latency"` deprioritizes slower endpoints instead of leaving
+    # the choice to price/throughput balancing.
+    extra_kwargs = {
+        "api_base": OPENROUTER_API_BASE,
+        "extra_body": {"provider": {"sort": "latency"}},
+    }
 
     if not model:
         return model, extra_kwargs

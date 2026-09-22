@@ -64,7 +64,10 @@ def test_normalize_model_for_provider(
     normalized, extra = normalize_model_for_provider(model_in, provider)
     assert normalized == model_out
     if expect_openrouter_kwargs:
-        assert extra == {"api_base": "https://openrouter.ai/api/v1"}
+        assert extra == {
+            "api_base": "https://openrouter.ai/api/v1",
+            "extra_body": {"provider": {"sort": "latency"}},
+        }
     else:
         assert extra == {}
 
