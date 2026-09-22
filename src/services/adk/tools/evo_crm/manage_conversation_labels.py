@@ -245,6 +245,11 @@ def create_manage_conversation_labels_tool() -> FunctionTool:
                     added.append(label)
 
             if not added:
+                logger.info(
+                    "manage_conversation_labels: no new labels added for conversation "
+                    f"{effective_conversation_id} (requested={requested}, "
+                    f"already present={current_labels})"
+                )
                 return {
                     "status": "success",
                     "message": "All requested labels were already present; nothing to update.",
