@@ -591,7 +591,13 @@ async def _create_task(
         # Find the pipeline item for this conversation
         pipeline_item_id = None
         if isinstance(items_response, dict):
-            items = items_response.get("payload", [])
+            # GET /pipelines/{id}/pipeline_items wraps its list under "data"
+            # (`{"success": true, "data": [...], "meta": {...}}`), not
+            # "payload" — that key belongs to a different endpoint shape
+            # (e.g. conversation labels). Reading the wrong key silently
+            # returned an empty list here, so this lookup always missed
+            # even when the pipeline item existed.
+            items = items_response.get("data", [])
             for item in items:
                 if item.get("conversation_id") == conversation_id:
                     pipeline_item_id = item.get("id")
