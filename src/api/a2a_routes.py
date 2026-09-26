@@ -1049,6 +1049,21 @@ async def handle_message_send(
 
         # CRM-236: bounded by whoever is waiting. When the caller hangs up the
         # run is cancelled instead of burning more of the provider's quota.
+        #
+        # System-initiated events are fire-and-forget: the Rails Sidekiq job that
+        # sends them completes in ~80ms without waiting for the LLM result, so the
+        # processor must run to completion regardless of client disconnect.
+        # Live bot conversation events (message_created, message_updated) are NOT
+        # in this set: their caller is the bot runtime, which stays connected
+        # throughout — disconnect there means a real timeout worth honouring.
+        _SYSTEM_INITIATED_EVENTS = {
+            "inactivity_action",       # stage/inbox inactivity rules
+            "conversation_opened",     # fired by AgentBotListener on new conversation
+            "conversation_resolved",   # fired by AgentBotListener on resolve
+            "webwidget_triggered",     # fired by AgentBotListener on widget trigger
+        }
+        is_system_initiated = metadata.get("evoai_crm_event") in _SYSTEM_INITIATED_EVENTS
+
         result = await run_unless_client_disconnects(
             request,
             run_agent(
@@ -1065,6 +1080,7 @@ async def handle_message_send(
                 user_id=user_id,  # Pass contact_id as user_id
             ),
             label=f"agent {agent_id} execution",
+            ignore_disconnect=is_system_initiated,
         )
 
         final_response = result.get("final_response", "No response")

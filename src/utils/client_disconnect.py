@@ -1,10 +1,16 @@
 """
-Stop running an agent once nobody is waiting for the answer.
+Stop running an agent once nobody is waiting for the answer — except for
+system-initiated work that must finish regardless of who called it.
 
 CRM-236: bot-runtime closes the A2A connection at its own ceiling and the
 processor kept working for another five minutes, burning the same quota whose
 exhaustion caused the timeout. `run_unless_client_disconnects` races the work
 against the ASGI disconnect signal and cancels it when the client is gone.
+
+The one deliberate exception is `ignore_disconnect=True`: callers pass this
+for fire-and-forget, system-initiated events (e.g. inactivity_action) whose
+HTTP caller is a short-lived job that isn't waiting on the result, so the
+work must run to completion even after that caller disconnects.
 """
 
 import asyncio
@@ -115,15 +121,20 @@ async def run_unless_client_disconnects(
     coro: Awaitable[Any],
     *,
     label: str = "agent execution",
+    ignore_disconnect: bool = False,
 ) -> Any:
     """Await `coro`, cancelling it if the client disconnects first.
+
+    When `ignore_disconnect` is True the coroutine runs to completion even if
+    the HTTP client hangs up — use this for system-initiated work (e.g.
+    inactivity_action events) that must complete regardless of who called it.
 
     Raises ClientGoneAway after cancelling. The work's own exceptions propagate
     unchanged, so callers keep their existing error handling.
     """
     task = asyncio.ensure_future(coro)
 
-    if not cancel_on_disconnect_enabled():
+    if not cancel_on_disconnect_enabled() or ignore_disconnect:
         return await task
 
     watcher = asyncio.ensure_future(
