@@ -64,6 +64,19 @@ class Settings(BaseSettings):
     POSTGRES_CONNECTION_STRING: str = os.getenv(
         "POSTGRES_CONNECTION_STRING", "postgresql://postgres:root@localhost:5432/evo_community"
     )
+    # SQLAlchemy's bare defaults (pool_size=5, max_overflow=10 => 15 total) are
+    # too small for this service's real concurrency (many stage-inactivity AI
+    # calls held open for 30-90s each, plus live chat traffic) and exhaust
+    # under load with no recovery until the process is restarted.
+    #
+    # These are PER PROCESS: with multiple uvicorn workers or replicas, the
+    # aggregate is (DB_POOL_SIZE + DB_MAX_OVERFLOW) * process_count, which can
+    # exceed Postgres's own max_connections (default 100) shared across every
+    # service on that instance. Size DB_POOL_SIZE/DB_MAX_OVERFLOW down (or
+    # raise Postgres's max_connections) to fit your actual process count and
+    # connection budget before scaling workers/replicas.
+    DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", 20))
+    DB_MAX_OVERFLOW: int = int(os.getenv("DB_MAX_OVERFLOW", 40))
 
     # AI engine settings
     AI_ENGINE: str = os.getenv("AI_ENGINE", "adk")
