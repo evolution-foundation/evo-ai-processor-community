@@ -69,11 +69,18 @@ class MCPToolCache:
                 f"Redis configuration: host={redis_config['host']}, port={redis_config['port']}, db={redis_config['db']}"
             )
 
+            # Defensive: ensure empty string password becomes None to avoid
+            # "AUTH called without any password configured" error on Redis servers
+            # that run without AUTH (common in community Docker setups).
+            redis_password = redis_config.get("password")
+            if redis_password is not None and str(redis_password).strip() == "":
+                redis_password = None
+
             self.redis = redis.Redis(
                 host=redis_config["host"],
                 port=redis_config["port"],
                 db=redis_config["db"],
-                password=redis_config["password"],
+                password=redis_password,
                 ssl=redis_config["ssl"],
                 decode_responses=False,  # We need bytes for pickle
             )

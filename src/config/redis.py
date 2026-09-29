@@ -52,11 +52,18 @@ def get_redis_config():
     Returns:
         dict: Redis configuration parameters
     """
+    # Treat empty string as None — Redis server without a password rejects
+    # AUTH when a non-None password is sent (redis-py sends AUTH even for ""),
+    # raising: "AUTH <password> called without any password configured".
+    redis_password = os.getenv("REDIS_PASSWORD", None)
+    if redis_password is not None and redis_password.strip() == "":
+        redis_password = None
+
     return {
         "host": os.getenv("REDIS_HOST", "localhost"),
         "port": int(os.getenv("REDIS_PORT", 6379)),
         "db": int(os.getenv("REDIS_DB", 0)),
-        "password": os.getenv("REDIS_PASSWORD", None),
+        "password": redis_password,
         "ssl": os.getenv("REDIS_SSL", "false").lower() == "true",
         "key_prefix": os.getenv("REDIS_KEY_PREFIX", "a2a:"),
         "default_ttl": int(os.getenv("REDIS_TTL", 3600)),
