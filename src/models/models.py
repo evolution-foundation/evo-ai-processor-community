@@ -39,6 +39,8 @@ from sqlalchemy import (
     Text,
     CheckConstraint,
     Boolean,
+    Index,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
@@ -295,6 +297,34 @@ class SessionMetadata(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
+class A2AIdempotencyRecord(Base):
+    """Durable response cache keyed by one CRM inbound message and agent."""
+
+    __tablename__ = "evo_ai_a2a_idempotency_records"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_id = Column(UUID(as_uuid=True), nullable=False)
+    context_id = Column(String(255), nullable=False)
+    idempotency_key = Column(String(128), nullable=False)
+    request_hash = Column(String(64), nullable=False)
+    state = Column(String(16), nullable=False, default="processing")
+    response = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id",
+            "context_id",
+            "idempotency_key",
+            name="uq_a2a_idempotency_agent_context_key",
+        ),
+        CheckConstraint("state IN ('processing', 'completed')", name="check_a2a_idempotency_state"),
+        Index("ix_a2a_idempotency_created_at", "created_at"),
+        {"info": {"skip_autogenerate": True}},
+    )
+
+
 class CustomMCPServer(Base):
     __tablename__ = "evo_core_custom_mcp_servers"
     __table_args__ = {"info": {"skip_autogenerate": True}}
@@ -374,4 +404,3 @@ class ExecutionMetrics(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     agent = relationship("Agent", backref="execution_metrics")
-

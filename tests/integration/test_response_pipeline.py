@@ -159,6 +159,8 @@ class TestA2AMessageSendErrorEnvelope:
             a2a_routes, "extract_conversation_history", new=AsyncMock(return_value=[])
         ), patch.object(
             a2a_routes, "extract_history_from_params", return_value=[]
+        ), patch.object(
+            a2a_routes, "claim_or_replay", return_value=("owner", None)
         ):
             response = asyncio.run(
                 a2a_routes.handle_message_send(
