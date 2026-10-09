@@ -81,6 +81,29 @@ class TestExtractors:
 
         assert extract_conversation_id(ctx) == CONV_ID
 
+    def test_the_crm_payload_comes_before_the_loose_state_keys(self):
+        ctx = _Ctx(
+            {
+                "evoai_crm_data": {"conversation_id": CONV_ID},
+                "conversation_id": "loose-conv",
+                "pipeline_item_id": "loose-item",
+            }
+        )
+        ctx.state["evoai_crm_data"]["pipeline_item_id"] = ITEM_ID
+
+        assert extract_conversation_id(ctx) == CONV_ID
+        assert extract_pipeline_item_id(ctx) == ITEM_ID
+
+    def test_the_full_contact_comes_before_the_crm_payload(self):
+        ctx = _Ctx(
+            {
+                "contact": {"id": CONTACT_ID},
+                "evoai_crm_data": {"contact": {"id": "payload-contact"}},
+            }
+        )
+
+        assert extract_contact_id(ctx) == CONTACT_ID
+
     def test_no_context_yields_none(self):
         for extract in (
             extract_conversation_id,
