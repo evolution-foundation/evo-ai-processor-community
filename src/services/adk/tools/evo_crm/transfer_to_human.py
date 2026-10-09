@@ -8,46 +8,10 @@ following transfer rules and best practices.
 from typing import Optional, Dict, Any, List
 from google.adk.tools import FunctionTool, ToolContext
 from src.services.adk.tools.evo_crm.base import EvoCrmClient
+from src.services.adk.tools.evo_crm.context_ids import extract_conversation_id, resolve_id
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-
-
-def _extract_conversation_id_from_metadata(tool_context: Optional[ToolContext]) -> Optional[str]:
-    """Extract conversation_id from tool_context metadata.
-    
-    Looks for conversation_id in various possible locations:
-    - evoai_crm_data.conversation_id (UUID)
-    - evoai_crm_data.conversation.id (display_id)
-    - conversation_id (direct)
-    - conversationId (camelCase)
-    """
-    if not tool_context or not hasattr(tool_context, 'state'):
-        return None
-    
-    state = tool_context.state
-    
-    # Try evoai_crm_data
-    evoai_crm_data = state.get("evoai_crm_data", {})
-    if isinstance(evoai_crm_data, dict):
-        # Try conversation_id (UUID)
-        conversation_id = evoai_crm_data.get("conversation_id")
-        if conversation_id:
-            return str(conversation_id)
-        
-        # Try conversation.id (display_id)
-        conversation = evoai_crm_data.get("conversation", {})
-        if isinstance(conversation, dict):
-            conv_id = conversation.get("id")
-            if conv_id:
-                return str(conv_id)
-    
-    # Try direct keys
-    for key in ["conversation_id", "conversationId"]:
-        if key in state:
-            return str(state[key])
-    
-    return None
 
 
 def _extract_transfer_rules_from_metadata(tool_context: Optional[ToolContext]) -> List[Dict[str, Any]]:
@@ -112,8 +76,8 @@ def create_transfer_to_human_tool(
         
     Args:
         assignee_id: The ID of the human agent to assign the conversation to (optional if transfer_rules are configured)
-        conversation_id: The ID of the conversation to transfer (optional,
-                        will be automatically extracted from conversation context)
+        conversation_id: DO NOT SET. The conversation context supplies it and
+            overrides anything passed here.
         team_id: Optional team ID to assign the conversation to a team instead (optional if transfer_rules are configured)
         reason: Optional reason for the transfer (for logging and context)
         tool_context: The tool context containing session information (automatically provided)
@@ -129,12 +93,9 @@ def create_transfer_to_human_tool(
             }
         """
         try:
-            # Extract conversation_id from metadata if not provided
-            effective_conversation_id = conversation_id
-            if not effective_conversation_id and tool_context:
-                effective_conversation_id = _extract_conversation_id_from_metadata(tool_context)
-                if effective_conversation_id:
-                    logger.info(f"Extracted conversation_id from metadata: {effective_conversation_id}")
+            effective_conversation_id = resolve_id(
+                "conversation_id", extract_conversation_id(tool_context), conversation_id
+            )
             
             # Validate required parameters
             if not effective_conversation_id:
@@ -313,7 +274,8 @@ def create_transfer_to_human_tool(
     you must provide assignee_id or team_id.{transfer_rules_doc}
     
     Args:
-        conversation_id: The ID of the conversation to transfer (optional, auto-extracted)
+        conversation_id: DO NOT SET. Supplied by the conversation context, which
+            overrides anything passed here.
         assignee_id: The ID of the human agent to assign to (optional if transfer_rules configured)
         team_id: Optional team ID to assign to a team instead (optional if transfer_rules configured)
         reason: Optional reason for transfer (for logging)

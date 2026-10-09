@@ -2,11 +2,11 @@
 
 import pytest
 
-from src.services.adk.tools.evo_crm.pipeline_manipulation import (
-    _extract_contact_id_from_metadata,
-    _extract_conversation_id_from_metadata,
-    create_pipeline_manipulation_tool,
+from src.services.adk.tools.evo_crm.context_ids import (
+    extract_contact_id,
+    extract_conversation_id,
 )
+from src.services.adk.tools.evo_crm.pipeline_manipulation import create_pipeline_manipulation_tool
 
 CONV_ID = "16e5207a-8be2-419e-9f31-d9b70a39a307"
 CONTACT_ID = "c6d3efd5-9d2b-42b7-b1cf-93d190255618"
@@ -31,20 +31,20 @@ def _ctx_with_conversation():
 
 class TestExtractionFromMetadata:
     def test_reads_the_conversation_id(self):
-        assert _extract_conversation_id_from_metadata(_ctx_with_conversation()) == CONV_ID
+        assert extract_conversation_id(_ctx_with_conversation()) == CONV_ID
 
     def test_reads_the_contact_id(self):
-        assert _extract_contact_id_from_metadata(_ctx_with_conversation()) == CONTACT_ID
+        assert extract_contact_id(_ctx_with_conversation()) == CONTACT_ID
 
     def test_the_two_ids_are_not_interchangeable(self):
         ctx = _ctx_with_conversation()
 
-        assert _extract_conversation_id_from_metadata(ctx) != _extract_contact_id_from_metadata(ctx)
+        assert extract_conversation_id(ctx) != extract_contact_id(ctx)
 
     def test_no_context_yields_none(self):
-        assert _extract_conversation_id_from_metadata(None) is None
-        assert _extract_contact_id_from_metadata(None) is None
-        assert _extract_conversation_id_from_metadata(_Ctx({})) is None
+        assert extract_conversation_id(None) is None
+        assert extract_contact_id(None) is None
+        assert extract_conversation_id(_Ctx({})) is None
 
 
 @pytest.mark.asyncio

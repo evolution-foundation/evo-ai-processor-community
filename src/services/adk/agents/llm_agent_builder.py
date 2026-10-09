@@ -816,19 +816,22 @@ class LlmAgentBuilder:
                 if rules_text:
                     crm_tools_instructions.append(
                         f"Transfer to Human Tool: Available. Use this tool when the user requests human assistance or when escalation is needed. "
+                        f"It acts on the current conversation: do NOT set conversation_id. "
                         f"Transfer rules configured: {'; '.join(rules_text)}. "
                         f"The tool will automatically use the configured transfer rules, so you don't need to specify assignee_id or team_id unless overriding the rules."
                     )
             else:
                 crm_tools_instructions.append(
                     "Transfer to Human Tool: Available. Use this tool when the user requests human assistance or when escalation is needed. "
+                    "It acts on the current conversation: do NOT set conversation_id. "
                     "You must provide assignee_id or team_id when using this tool."
                 )
         
         if allow_reminders:
             crm_tools_instructions.append(
                 "Send Private Message Tool: Available. Use this tool to create private reminders or internal notes that are only visible to agents, not to customers. "
-                "Use this when the user asks to set a reminder, create an internal note, or when you need to leave private context for other agents."
+                "Use this when the user asks to set a reminder, create an internal note, or when you need to leave private context for other agents. "
+                "It acts on the current conversation: do NOT set conversation_id."
             )
         
         if allow_contact_edit:
@@ -842,7 +845,7 @@ class LlmAgentBuilder:
             crm_tools_instructions.append(
                 f"Update Contact Tool: Available. Use this tool to update contact information when the user requests changes to their data. "
                 f"You can edit the following fields: {fields_text}.{instructions_text} "
-                f"The contact_id will be automatically extracted from the conversation context, so you don't need to provide it explicitly. "
+                f"Do NOT set contact_id — the conversation context supplies it and overrides anything you pass. "
                 f"Simply call the tool with the fields you want to update (e.g., name, email, phone_number, etc.)."
             )
 
@@ -869,7 +872,8 @@ class LlmAgentBuilder:
                 "Manage Conversation Labels Tool: Available. Use this tool to tag the current conversation with short, lower-case labels (e.g. \"vip\", \"awaiting-payment\", \"followup\") so it can be filtered and routed in the CRM. "
                 "Actions: action=\"list\" returns the current labels; action=\"add\" appends one or more labels preserving the existing ones; action=\"remove\" removes specific labels. "
                 "Always prefer calling action=\"list\" first when you are unsure which labels are already attached, then decide whether to add or remove. "
-                "Only manage labels when the user's request, the conversation state or your routing rules clearly justify it — do not invent random tags."
+                "Only manage labels when the user's request, the conversation state or your routing rules clearly justify it — do not invent random tags. "
+                "It acts on the current conversation: do NOT set conversation_id."
             )
 
         if allow_product_sales:

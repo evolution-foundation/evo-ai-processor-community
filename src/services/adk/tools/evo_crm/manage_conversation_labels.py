@@ -17,42 +17,10 @@ from typing import Any, Dict, List, Optional
 from google.adk.tools import FunctionTool, ToolContext
 
 from src.services.adk.tools.evo_crm.base import EvoCrmClient
+from src.services.adk.tools.evo_crm.context_ids import extract_conversation_id, resolve_id
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-
-
-def _extract_conversation_id_from_metadata(tool_context: Optional[ToolContext]) -> Optional[str]:
-    """Extract conversation_id from tool_context metadata.
-
-    Looks for conversation_id in various possible locations:
-    - evoai_crm_data.conversation_id (UUID)
-    - evoai_crm_data.conversation.id (display_id)
-    - conversation_id (direct)
-    - conversationId (camelCase)
-    """
-    if not tool_context or not hasattr(tool_context, "state"):
-        return None
-
-    state = tool_context.state
-
-    evoai_crm_data = state.get("evoai_crm_data", {})
-    if isinstance(evoai_crm_data, dict):
-        conversation_id = evoai_crm_data.get("conversation_id")
-        if conversation_id:
-            return str(conversation_id)
-
-        conversation = evoai_crm_data.get("conversation", {})
-        if isinstance(conversation, dict):
-            conv_id = conversation.get("id")
-            if conv_id:
-                return str(conv_id)
-
-    for key in ("conversation_id", "conversationId"):
-        if key in state:
-            return str(state[key])
-
-    return None
 
 
 def _normalize_labels(raw: Any) -> List[str]:
@@ -128,8 +96,8 @@ def create_manage_conversation_labels_tool() -> FunctionTool:
             action: One of ``list``, ``add``, ``remove``.
             labels: For ``add`` / ``remove``: a label title (string) or a list
                 of titles. Ignored when action is ``list``.
-            conversation_id: Optional UUID of the conversation. Auto-extracted
-                from the tool context when omitted.
+            conversation_id: DO NOT SET. The conversation context supplies it and
+                overrides anything passed here.
             tool_context: Provided automatically by the runtime.
 
         Returns:
@@ -138,11 +106,9 @@ def create_manage_conversation_labels_tool() -> FunctionTool:
                "conversation_id": "...", "action": "...",
                "labels": ["label-a", "label-b"], ...}``.
         """
-        effective_conversation_id = conversation_id
-        if not effective_conversation_id and tool_context:
-            effective_conversation_id = _extract_conversation_id_from_metadata(tool_context)
-            if effective_conversation_id:
-                logger.info(f"Extracted conversation_id from metadata: {effective_conversation_id}")
+        effective_conversation_id = resolve_id(
+            "conversation_id", extract_conversation_id(tool_context), conversation_id
+        )
 
         if not effective_conversation_id:
             return {
@@ -338,7 +304,8 @@ def create_manage_conversation_labels_tool() -> FunctionTool:
     Args:
         action: "list" | "add" | "remove"
         labels: label title or list of titles (required for add/remove)
-        conversation_id: optional UUID, auto-extracted from context when omitted
+        conversation_id: DO NOT SET. Supplied by the conversation context, which
+            overrides anything passed here.
 
     Returns:
         Dictionary with action result and the resulting label list.

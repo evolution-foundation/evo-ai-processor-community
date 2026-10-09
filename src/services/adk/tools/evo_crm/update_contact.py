@@ -9,47 +9,9 @@ from typing import Dict, Any, Optional, List
 from google.adk.tools import FunctionTool, ToolContext
 from src.utils.logger import setup_logger
 from src.services.adk.tools.evo_crm.base import EvoCrmClient
+from src.services.adk.tools.evo_crm.context_ids import extract_contact_id, resolve_id
 
 logger = setup_logger(__name__)
-
-
-def _extract_conversation_id_from_metadata(tool_context: ToolContext) -> Optional[str]:
-    """Extracts conversation ID from tool_context metadata."""
-    evoai_crm_data = tool_context.state.get("evoai_crm_data", {})
-    return evoai_crm_data.get("conversation_id") or evoai_crm_data.get("conversation", {}).get("id")
-
-
-def _extract_contact_id_from_metadata(tool_context: ToolContext) -> Optional[str]:
-    """Extracts contact ID from tool_context metadata."""
-    if not tool_context or not hasattr(tool_context, 'state'):
-        return None
-    
-    state = tool_context.state
-    
-    # Try to get contact directly from state (most common case)
-    contact = state.get("contact")
-    if isinstance(contact, dict) and contact.get("id"):
-        return str(contact.get("id"))
-    
-    # Try evoai_crm_data
-    evoai_crm_data = state.get("evoai_crm_data", {})
-    if isinstance(evoai_crm_data, dict):
-        # Try contact inside evoai_crm_data
-        contact_data = evoai_crm_data.get("contact", {})
-        if isinstance(contact_data, dict) and contact_data.get("id"):
-            return str(contact_data.get("id"))
-        
-        # Try direct keys
-        contact_id = evoai_crm_data.get("contactId") or evoai_crm_data.get("contact_id")
-        if contact_id:
-            return str(contact_id)
-    
-    # Try direct state keys
-    contact_id = state.get("contactId") or state.get("contact_id")
-    if contact_id:
-        return str(contact_id)
-    
-    return None
 
 
 def create_update_contact_tool() -> FunctionTool:
@@ -93,7 +55,8 @@ def create_update_contact_tool() -> FunctionTool:
             custom_attributes: Dictionary of custom attributes to update (optional)
             additional_attributes: Dictionary of additional attributes to update (optional)
             labels: List of label names to add to the contact (optional)
-            contact_id: The ID of the contact to update (optional, will be automatically extracted from context)
+            contact_id: DO NOT SET. The conversation context supplies it and
+                overrides anything passed here.
             tool_context: The tool context containing session information (automatically provided)
             
         Returns:
@@ -106,12 +69,9 @@ def create_update_contact_tool() -> FunctionTool:
             }
         """
         try:
-            # Extract contact_id from metadata if not provided
-            effective_contact_id = contact_id
-            if not effective_contact_id and tool_context:
-                effective_contact_id = _extract_contact_id_from_metadata(tool_context)
-                if effective_contact_id:
-                    logger.info(f"Extracted contact_id from metadata: {effective_contact_id}")
+            effective_contact_id = resolve_id(
+                "contact_id", extract_contact_id(tool_context), contact_id
+            )
             
             # Validate required parameters
             if not effective_contact_id:
@@ -255,7 +215,8 @@ def create_update_contact_tool() -> FunctionTool:
         custom_attributes: Dictionary of custom attributes to update (optional)
         additional_attributes: Dictionary of additional attributes to update (optional)
         labels: List of label names to add to the contact (optional)
-        contact_id: The ID of the contact to update (required, auto-extracted if not provided)
+        contact_id: DO NOT SET. Supplied by the conversation context, which
+            overrides anything passed here.
     
     Returns:
         Dictionary with update status and contact details
