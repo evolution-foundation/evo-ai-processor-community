@@ -2,6 +2,7 @@
 
 import pytest
 
+from src.services.adk.tools.evo_crm.base import EvoCrmClient
 from src.services.adk.tools.evo_crm.context_ids import (
     extract_contact_id,
     extract_conversation_id,
@@ -105,3 +106,43 @@ class TestContextWinsOverTheModel:
         )
 
         assert seen["conversation_id"] == "explicit-conv"
+
+
+@pytest.mark.asyncio
+class TestAddToPipelineSendsTheContextIds:
+    """add_to_pipeline is where the live failure happened and the only action where both ids meet."""
+
+    async def _posted_body(self, monkeypatch, **kwargs):
+        posted = {}
+
+        async def fake_post(self, endpoint, json_data=None, **_):
+            posted["endpoint"] = endpoint
+            posted["body"] = json_data
+            return {"id": "item-1"}
+
+        monkeypatch.setattr(EvoCrmClient, "post", fake_post)
+        tool = create_pipeline_manipulation_tool()
+        await tool.func(action="add_to_pipeline", pipeline_id="pipe-1", stage_id="stg-1", **kwargs)
+        return posted["body"]
+
+    async def test_the_conversation_from_the_context_is_added_whatever_ids_the_model_sends(self, monkeypatch):
+        body = await self._posted_body(
+            monkeypatch,
+            conversation_id=CONTACT_ID,
+            contact_id="model-contact",
+            tool_context=_ctx_with_conversation(),
+        )
+
+        assert body["type"] == "conversation"
+        assert body["item_id"] == CONV_ID
+
+    async def test_the_context_contact_overrides_the_contact_id_the_model_sends(self, monkeypatch):
+        # No conversation in the context, so the contact is the item: it must be the context's.
+        body = await self._posted_body(
+            monkeypatch,
+            contact_id="model-contact",
+            tool_context=_Ctx({"evoai_crm_data": {"contactId": CONTACT_ID}}),
+        )
+
+        assert body["type"] == "contact"
+        assert body["item_id"] == CONTACT_ID
