@@ -19,42 +19,10 @@ from typing import Any, Dict, Optional
 from google.adk.tools import FunctionTool, ToolContext
 
 from src.services.adk.tools.evo_crm.base import EvoCrmClient
+from src.services.adk.tools.evo_crm.context_ids import extract_pipeline_item_id, resolve_id
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-
-
-def _extract_pipeline_item_id(tool_context: Optional[ToolContext]) -> Optional[str]:
-    """Extract pipeline_item_id from tool_context.state.
-
-    Looked up in order:
-      - evoai_crm_data.pipeline_item_id
-      - evoai_crm_data.pipeline_item.id
-      - pipeline_item_id (direct)
-      - pipelineItemId (camelCase)
-    """
-    if not tool_context or not hasattr(tool_context, "state"):
-        return None
-
-    state = tool_context.state
-
-    evoai_crm_data = state.get("evoai_crm_data", {})
-    if isinstance(evoai_crm_data, dict):
-        direct = evoai_crm_data.get("pipeline_item_id")
-        if direct:
-            return str(direct)
-
-        pipeline_item = evoai_crm_data.get("pipeline_item", {})
-        if isinstance(pipeline_item, dict):
-            value = pipeline_item.get("id")
-            if value:
-                return str(value)
-
-    for key in ("pipeline_item_id", "pipelineItemId"):
-        if key in state:
-            return str(state[key])
-
-    return None
 
 
 def _extract_agent_id(tool_context: Optional[ToolContext]) -> Optional[str]:
@@ -104,19 +72,17 @@ def create_link_product_to_pipeline_item_tool() -> FunctionTool:
             quantity: How many units. Must be a positive integer. Defaults to 1.
             product_variant_id: Optional UUID of the variant (e.g. size/color).
             notes: Optional free-form note recorded with the sale.
-            pipeline_item_id: Optional UUID; auto-extracted from context when
-                omitted (the conversation's pipeline_item).
+            pipeline_item_id: Optional UUID. When the conversation context
+                carries the pipeline item, it overrides anything passed here.
             tool_context: Provided automatically by the runtime.
 
         Returns:
             Dictionary with status, the created link details and a
             human-readable message.
         """
-        effective_pi_id = pipeline_item_id
-        if not effective_pi_id and tool_context:
-            effective_pi_id = _extract_pipeline_item_id(tool_context)
-            if effective_pi_id:
-                logger.info(f"Extracted pipeline_item_id from context: {effective_pi_id}")
+        effective_pi_id = resolve_id(
+            "pipeline_item_id", extract_pipeline_item_id(tool_context), pipeline_item_id
+        )
 
         if not effective_pi_id:
             return {

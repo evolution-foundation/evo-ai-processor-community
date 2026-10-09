@@ -8,61 +8,14 @@ and create/manage tasks within the pipeline.
 from typing import Optional, Dict, Any, List
 from google.adk.tools import FunctionTool, ToolContext
 from src.services.adk.tools.evo_crm.base import EvoCrmClient
+from src.services.adk.tools.evo_crm.context_ids import (
+    extract_contact_id,
+    extract_conversation_id,
+    resolve_id,
+)
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-
-
-def _extract_conversation_id_from_metadata(tool_context: Optional[ToolContext]) -> Optional[str]:
-    """Extract conversation_id from tool_context metadata."""
-    if not tool_context or not hasattr(tool_context, 'state'):
-        return None
-
-    state = tool_context.state
-    evoai_crm_data = state.get("evoai_crm_data", {})
-    if isinstance(evoai_crm_data, dict):
-        conversation_id = evoai_crm_data.get("conversation_id")
-        if conversation_id:
-            return str(conversation_id)
-
-        conversation = evoai_crm_data.get("conversation", {})
-        if isinstance(conversation, dict):
-            conv_id = conversation.get("id")
-            if conv_id:
-                return str(conv_id)
-
-    for key in ["conversation_id", "conversationId"]:
-        if key in state:
-            return str(state[key])
-
-    return None
-
-
-def _extract_contact_id_from_metadata(tool_context: Optional[ToolContext]) -> Optional[str]:
-    """Extract contact_id from tool_context metadata."""
-    if not tool_context or not hasattr(tool_context, 'state'):
-        return None
-
-    state = tool_context.state
-    contact = state.get("contact")
-    if isinstance(contact, dict) and contact.get("id"):
-        return str(contact.get("id"))
-
-    evoai_crm_data = state.get("evoai_crm_data", {})
-    if isinstance(evoai_crm_data, dict):
-        contact_data = evoai_crm_data.get("contact", {})
-        if isinstance(contact_data, dict) and contact_data.get("id"):
-            return str(contact_data.get("id"))
-
-        contact_id = evoai_crm_data.get("contactId") or evoai_crm_data.get("contact_id")
-        if contact_id:
-            return str(contact_id)
-
-    contact_id = state.get("contactId") or state.get("contact_id")
-    if contact_id:
-        return str(contact_id)
-
-    return None
 
 
 def _extract_pipeline_rules_from_metadata(tool_context: Optional[ToolContext]) -> List[Dict[str, Any]]:
@@ -173,29 +126,12 @@ def create_pipeline_manipulation_tool(
             }
         """
         try:
-            # CRM-237: the conversation/contact of a turn is a fact of the context, not a
-            # model choice — the prompt already promises the id is auto-extracted. Metadata
-            # wins; the model's argument only stands when the context is silent.
-            context_contact_id = _extract_contact_id_from_metadata(tool_context) if tool_context else None
-            context_conversation_id = _extract_conversation_id_from_metadata(tool_context) if tool_context else None
-
-            effective_contact_id = context_contact_id or contact_id
-            if context_contact_id:
-                if contact_id and contact_id != context_contact_id:
-                    logger.warning(
-                        f"[CRM-237] ignoring contact_id={contact_id!r} from the model; "
-                        f"the conversation's contact is {context_contact_id}"
-                    )
-                logger.info(f"Extracted contact_id from metadata: {effective_contact_id}")
-
-            effective_conversation_id = context_conversation_id or conversation_id
-            if context_conversation_id:
-                if conversation_id and conversation_id != context_conversation_id:
-                    logger.warning(
-                        f"[CRM-237] ignoring conversation_id={conversation_id!r} from the model; "
-                        f"the current conversation is {context_conversation_id}"
-                    )
-                logger.info(f"Extracted conversation_id from metadata: {effective_conversation_id}")
+            effective_contact_id = resolve_id(
+                "contact_id", extract_contact_id(tool_context), contact_id
+            )
+            effective_conversation_id = resolve_id(
+                "conversation_id", extract_conversation_id(tool_context), conversation_id
+            )
 
             # Get pipeline_rules from tool context if not provided during tool creation
             available_pipeline_rules = default_pipeline_rules

@@ -2,11 +2,12 @@
 
 import pytest
 
-from src.services.adk.tools.evo_crm.pipeline_manipulation import (
-    _extract_contact_id_from_metadata,
-    _extract_conversation_id_from_metadata,
-    create_pipeline_manipulation_tool,
+from src.services.adk.tools.evo_crm.base import EvoCrmClient
+from src.services.adk.tools.evo_crm.context_ids import (
+    extract_contact_id,
+    extract_conversation_id,
 )
+from src.services.adk.tools.evo_crm.pipeline_manipulation import create_pipeline_manipulation_tool
 
 CONV_ID = "16e5207a-8be2-419e-9f31-d9b70a39a307"
 CONTACT_ID = "c6d3efd5-9d2b-42b7-b1cf-93d190255618"
@@ -31,20 +32,20 @@ def _ctx_with_conversation():
 
 class TestExtractionFromMetadata:
     def test_reads_the_conversation_id(self):
-        assert _extract_conversation_id_from_metadata(_ctx_with_conversation()) == CONV_ID
+        assert extract_conversation_id(_ctx_with_conversation()) == CONV_ID
 
     def test_reads_the_contact_id(self):
-        assert _extract_contact_id_from_metadata(_ctx_with_conversation()) == CONTACT_ID
+        assert extract_contact_id(_ctx_with_conversation()) == CONTACT_ID
 
     def test_the_two_ids_are_not_interchangeable(self):
         ctx = _ctx_with_conversation()
 
-        assert _extract_conversation_id_from_metadata(ctx) != _extract_contact_id_from_metadata(ctx)
+        assert extract_conversation_id(ctx) != extract_contact_id(ctx)
 
     def test_no_context_yields_none(self):
-        assert _extract_conversation_id_from_metadata(None) is None
-        assert _extract_contact_id_from_metadata(None) is None
-        assert _extract_conversation_id_from_metadata(_Ctx({})) is None
+        assert extract_conversation_id(None) is None
+        assert extract_contact_id(None) is None
+        assert extract_conversation_id(_Ctx({})) is None
 
 
 @pytest.mark.asyncio
@@ -105,3 +106,43 @@ class TestContextWinsOverTheModel:
         )
 
         assert seen["conversation_id"] == "explicit-conv"
+
+
+@pytest.mark.asyncio
+class TestAddToPipelineSendsTheContextIds:
+    """add_to_pipeline is where the live failure happened and the only action where both ids meet."""
+
+    async def _posted_body(self, monkeypatch, **kwargs):
+        posted = {}
+
+        async def fake_post(self, endpoint, json_data=None, **_):
+            posted["endpoint"] = endpoint
+            posted["body"] = json_data
+            return {"id": "item-1"}
+
+        monkeypatch.setattr(EvoCrmClient, "post", fake_post)
+        tool = create_pipeline_manipulation_tool()
+        await tool.func(action="add_to_pipeline", pipeline_id="pipe-1", stage_id="stg-1", **kwargs)
+        return posted["body"]
+
+    async def test_the_conversation_from_the_context_is_added_whatever_ids_the_model_sends(self, monkeypatch):
+        body = await self._posted_body(
+            monkeypatch,
+            conversation_id=CONTACT_ID,
+            contact_id="model-contact",
+            tool_context=_ctx_with_conversation(),
+        )
+
+        assert body["type"] == "conversation"
+        assert body["item_id"] == CONV_ID
+
+    async def test_the_context_contact_overrides_the_contact_id_the_model_sends(self, monkeypatch):
+        # No conversation in the context, so the contact is the item: it must be the context's.
+        body = await self._posted_body(
+            monkeypatch,
+            contact_id="model-contact",
+            tool_context=_Ctx({"evoai_crm_data": {"contactId": CONTACT_ID}}),
+        )
+
+        assert body["type"] == "contact"
+        assert body["item_id"] == CONTACT_ID
