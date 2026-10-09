@@ -101,7 +101,7 @@ def create_transfer_to_human_tool(
             if not effective_conversation_id:
                 return {
                     "status": "error",
-                    "message": "conversation_id is required. It should be automatically extracted from the conversation context, but if not available, please provide it explicitly.",
+                    "message": "No conversation in context: this tool only runs inside a conversation.",
                     "conversation_id": None,
                 }
             

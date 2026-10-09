@@ -77,7 +77,7 @@ def create_update_contact_tool() -> FunctionTool:
             if not effective_contact_id:
                 return {
                     "status": "error",
-                    "message": "contact_id is required. It should be automatically extracted from the conversation context, but if not available, please provide it explicitly.",
+                    "message": "No contact in context: this tool only runs inside a conversation.",
                     "contact_id": None,
                 }
             

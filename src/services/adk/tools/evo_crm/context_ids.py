@@ -1,11 +1,8 @@
 """
-Ids of the current turn, read from the tool context.
-
-The conversation, contact and pipeline item an EvoCRM tool acts on are facts of
-the turn, not choices of the model: the ContactInfo block puts other UUIDs in
-the prompt and the model copies them into tool arguments. So when the context
-carries an id it wins over the argument; the argument only stands when the
-context is silent (playground and direct API calls).
+Ids of the current turn, read from the tool context. The model copies other
+UUIDs from the ContactInfo block into tool arguments, so the context's id wins;
+the argument only stands when the context is silent
+(playground and direct API calls).
 """
 
 from typing import Any, Optional

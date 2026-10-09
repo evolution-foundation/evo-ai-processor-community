@@ -1,4 +1,4 @@
-"""The EvoCRM tools act on the turn's conversation/contact/pipeline item, never on an id the model picked."""
+"""The EvoCRM tools act on the turn's conversation/contact/pipeline item; the model's id only stands when the context has none."""
 
 import pytest
 
@@ -257,3 +257,37 @@ class TestTheModelsIdStandsWhenTheContextIsSilent:
         )
 
         assert _endpoints(crm_calls) == [f"/pipeline_items/{MODEL_ID}/products"]
+
+
+@pytest.mark.asyncio
+class TestWithoutAnyIdTheToolRefusesWithoutAskingTheModelForOne:
+    def _assert_refused(self, result, crm_calls):
+        assert result["status"] == "error"
+        assert "inside a conversation" in result["message"]
+        assert crm_calls == []
+
+    async def test_update_contact(self, crm_calls):
+        result = await create_update_contact_tool().func(name="Ana", tool_context=_Ctx({}))
+
+        self._assert_refused(result, crm_calls)
+
+    async def test_send_private_message(self, crm_calls):
+        result = await create_send_private_message_tool()(
+            content="lembrete", tool_context=_Ctx({})
+        )
+
+        self._assert_refused(result, crm_calls)
+
+    async def test_transfer_to_human(self, crm_calls):
+        result = await create_transfer_to_human_tool().func(
+            assignee_id="agent-1", tool_context=_Ctx({})
+        )
+
+        self._assert_refused(result, crm_calls)
+
+    async def test_manage_conversation_labels(self, crm_calls):
+        result = await create_manage_conversation_labels_tool().func(
+            action="list", tool_context=_Ctx({})
+        )
+
+        self._assert_refused(result, crm_calls)

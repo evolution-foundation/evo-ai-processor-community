@@ -113,10 +113,7 @@ def create_manage_conversation_labels_tool() -> FunctionTool:
         if not effective_conversation_id:
             return {
                 "status": "error",
-                "message": (
-                    "conversation_id is required. It should be auto-extracted from the "
-                    "conversation context; provide it explicitly if not available."
-                ),
+                "message": "No conversation in context: this tool only runs inside a conversation.",
                 "conversation_id": None,
                 "action": action,
             }
