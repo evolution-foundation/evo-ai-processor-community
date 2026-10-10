@@ -540,6 +540,15 @@ class LlmAgentBuilder:
         self, agent: Agent, processed_agents: set = None, enabled_tools: List[str] = []
     ) -> Tuple[LlmAgent, Optional[List[str]]]:
         """Create an LLM agent from the agent data."""
+        # RunnerUtils attaches `_integrations` to the root agent only. Sub agents
+        # come straight out of get_agent() without it, so load theirs here or the
+        # integration backed tools (knowledge_nexus_search, ...) are never built
+        # for them. `is None`, not falsy: an empty list from the runner is final.
+        if getattr(agent, "_integrations", None) is None:
+            from src.services.agent_service import get_agent_integrations
+
+            agent._integrations = await get_agent_integrations(self.db, str(agent.id))
+
         # Merge integrations from the dedicated `agent_integrations` table into
         # the in-memory agent.config so native tools (ElevenLabs, Knowledge Nexus,
         # Google Calendar, Google Sheets) gated by `integrations[*].connected`
