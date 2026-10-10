@@ -5,13 +5,47 @@ This tool allows agents to transfer conversations to human agents,
 following transfer rules and best practices.
 """
 
-from typing import Optional, Dict, Any, List
+import re
+from typing import Optional, Dict, Any, List, Set
 from google.adk.tools import FunctionTool, ToolContext
 from src.services.adk.tools.evo_crm.base import EvoCrmClient
 from src.services.adk.tools.evo_crm.context_ids import extract_conversation_id, resolve_id
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+# Common PT/EN words that appear in almost any transfer-rule instructions or
+# reason text (articles, prepositions, generic customer-service vocabulary).
+# Excluding them prevents a coincidental match on e.g. "cliente"/"para"/
+# "informações" from selecting an unrelated rule (EVO-2247).
+_STOPWORDS: Set[str] = {
+    "para", "sobre", "quando", "cliente", "solicitar", "informações",
+    "informacoes", "assuntos", "outros", "relacionados", "pedir", "pediu",
+    "quiser", "envie", "mensagem", "antes", "trasnferir", "transferir",
+    "instant", "the", "and", "for", "with", "about", "customer", "when",
+    "requests", "requested", "other", "related", "issues", "before",
+}
+
+
+def _tokenize(text: str) -> Set[str]:
+    """Lowercase word tokens (letters only, length > 3) from free text."""
+    return {word for word in _WORD_RE.findall(text.lower()) if len(word) > 3}
+
+
+def _rule_has_valid_target(rule: Dict[str, Any]) -> bool:
+    """Whether a transfer rule actually has the id its transferTo needs.
+
+    A rule can win keyword matching or the first-valid-rule fallback purely
+    on its instructions text while missing the userId/teamId its transferTo
+    requires — selecting it would leave both effective_assignee_id and
+    effective_team_id unset, a hard error later instead of trying the next
+    best-matching, actually-usable rule.
+    """
+    return (rule.get("transferTo") == "human" and bool(rule.get("userId"))) or (
+        rule.get("transferTo") == "team" and bool(rule.get("teamId"))
+    )
 
 
 def _extract_transfer_rules_from_metadata(tool_context: Optional[ToolContext]) -> List[Dict[str, Any]]:
@@ -51,6 +85,7 @@ def create_transfer_to_human_tool(
         assignee_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         team_id: Optional[str] = None,
+        rule_index: Optional[int] = None,
         reason: Optional[str] = None,
         tool_context: Optional[ToolContext] = None,
     ) -> Dict[str, Any]:
@@ -115,21 +150,97 @@ def create_transfer_to_human_tool(
             effective_team_id = team_id
             
             if not effective_assignee_id and not effective_team_id and available_transfer_rules:
-                # Use the first transfer rule that matches "human" or "team"
-                # In the future, this could be enhanced to evaluate rule conditions
-                for rule in available_transfer_rules:
-                    if rule.get("transferTo") == "human" and rule.get("userId"):
-                        effective_assignee_id = rule.get("userId")
+                # An explicit rule_index that doesn't resolve to a configured
+                # rule is a contract failure, not "no preference" — report it
+                # instead of silently falling through to keyword matching or
+                # the first rule, which would hide the model's mistake behind
+                # a transfer to a possibly-wrong team.
+                if rule_index is not None and not (1 <= rule_index <= len(available_transfer_rules)):
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"rule_index {rule_index} is out of range — this agent has "
+                            f"{len(available_transfer_rules)} configured transfer rule(s), "
+                            f"numbered 1-{len(available_transfer_rules)}."
+                        ),
+                        "conversation_id": effective_conversation_id,
+                    }
+
+                selected_rule = None
+
+                # Preferred path: the model picked a specific rule from the
+                # numbered list in its own docstring (see transfer_rules_doc).
+                if rule_index is not None:
+                    candidate_rule = available_transfer_rules[rule_index - 1]
+                    if not _rule_has_valid_target(candidate_rule):
+                        return {
+                            "status": "error",
+                            "message": (
+                                f"Transfer rule #{rule_index} is missing a valid "
+                                "assignee/team id for its transferTo type — ask an "
+                                "admin to fix this rule's configuration, or pass "
+                                "assignee_id/team_id explicitly."
+                            ),
+                            "conversation_id": effective_conversation_id,
+                        }
+                    selected_rule = candidate_rule
+                    logger.info(f"Using transfer rule #{rule_index} selected by the model")
+
+                # No explicit index: previously this silently fell back to
+                # "the first rule with a valid team/user", which routed EVERY
+                # transfer to whichever rule happened to be listed first,
+                # regardless of the actual reason (EVO-2247). Instead, score
+                # each rule by how many meaningful (non-stopword) keywords it
+                # shares with the reason, and take the best-scoring rule —
+                # not just the first one with any overlap at all, since a
+                # single generic word (e.g. "cliente", "para") appearing in
+                # an unrelated rule's instructions would otherwise misroute.
+                if selected_rule is None and reason:
+                    reason_words = {
+                        word for word in _tokenize(reason) if word not in _STOPWORDS
+                    }
+                    best_rule = None
+                    best_score = 0
+                    for rule in available_transfer_rules:
+                        if not _rule_has_valid_target(rule):
+                            continue
+
+                        instruction_words = {
+                            word for word in _tokenize(rule.get("instructions") or "")
+                            if word not in _STOPWORDS
+                        }
+                        score = len(reason_words & instruction_words)
+                        if score > best_score:
+                            best_score = score
+                            best_rule = rule
+                    if best_rule is not None:
+                        selected_rule = best_rule
+                        logger.info(
+                            f"Matched transfer rule by keyword overlap "
+                            f"(score={best_score}) between reason and instructions"
+                        )
+
+                if selected_rule is None:
+                    selected_rule = next(
+                        (rule for rule in available_transfer_rules if _rule_has_valid_target(rule)),
+                        None,
+                    )
+                    if selected_rule:
+                        logger.warning(
+                            "No rule_index and no keyword match against instructions — "
+                            "falling back to the first configured rule. The caller should "
+                            "pass rule_index to avoid misrouting."
+                        )
+
+                if selected_rule:
+                    if selected_rule.get("transferTo") == "human" and selected_rule.get("userId"):
+                        effective_assignee_id = selected_rule.get("userId")
                         logger.info(f"Using transfer rule to assign to user {effective_assignee_id}")
-                        if rule.get("instructions"):
-                            reason = reason or rule.get("instructions")
-                        break
-                    elif rule.get("transferTo") == "team" and rule.get("teamId"):
-                        effective_team_id = rule.get("teamId")
+                    elif selected_rule.get("transferTo") == "team" and selected_rule.get("teamId"):
+                        effective_team_id = selected_rule.get("teamId")
                         logger.info(f"Using transfer rule to assign to team {effective_team_id}")
-                        if rule.get("instructions"):
-                            reason = reason or rule.get("instructions")
-                        break
+                    if selected_rule.get("instructions"):
+                        reason = reason or selected_rule.get("instructions")
             
             # Validate that we have either assignee_id or team_id
             if not effective_assignee_id and not effective_team_id:
@@ -251,7 +362,7 @@ def create_transfer_to_human_tool(
     # Build docstring with transfer rules information
     transfer_rules_doc = ""
     if default_transfer_rules:
-        transfer_rules_doc = "\n\nConfigured Transfer Rules:\n"
+        transfer_rules_doc = "\n\nConfigured Transfer Rules (pass rule_index matching the one that fits):\n"
         for i, rule in enumerate(default_transfer_rules, 1):
             transfer_to = rule.get("transferTo", "unknown")
             instructions = rule.get("instructions", "")
@@ -264,22 +375,28 @@ def create_transfer_to_human_tool(
             if instructions:
                 transfer_rules_doc += f" ({instructions})"
             transfer_rules_doc += "\n"
-    
+
     transfer_to_human.__doc__ = f"""Transfer a conversation to a human agent.
-    
+
     Use this tool when the user requests human assistance, when complex issues require
     human expertise, or when escalation is needed based on transfer rules.
-    
-    If transfer_rules are configured, they will be used automatically. Otherwise,
-    you must provide assignee_id or team_id.{transfer_rules_doc}
-    
+
+    If transfer_rules are configured, you MUST pass rule_index set to the number of
+    whichever configured rule below actually matches what the user asked about — do
+    not omit it and rely on a default, there is no single "default" rule and omitting
+    it risks the wrong team. Otherwise, provide assignee_id or team_id
+    explicitly.{transfer_rules_doc}
+
     Args:
         conversation_id: DO NOT SET. Supplied by the conversation context, which
             overrides anything passed here.
         assignee_id: The ID of the human agent to assign to (optional if transfer_rules configured)
         team_id: Optional team ID to assign to a team instead (optional if transfer_rules configured)
+        rule_index: The 1-based number of the configured transfer rule (above) that matches
+            this situation. Required whenever transfer_rules are configured and you are not
+            passing assignee_id/team_id explicitly.
         reason: Optional reason for transfer (for logging)
-    
+
     Returns:
         Dictionary with transfer status and details
     """
