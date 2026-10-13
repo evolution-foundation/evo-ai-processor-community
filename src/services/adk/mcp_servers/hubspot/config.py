@@ -12,6 +12,7 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 
 from src.services.agent_service import get_agent_integrations
+from src.services.mcp_provider_endpoints import trusted_mcp_url
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ async def get_hubspot_mcp_config(
         config = hubspot_integration.get("config", {})
         access_token = config.get("access_token")
         refresh_token = config.get("refresh_token")
-        mcp_url = config.get("mcp_url", "https://mcp.hubspot.com/mcp")
+        mcp_url = trusted_mcp_url("hubspot", config.get("mcp_url"), "https://mcp.hubspot.com/mcp")
         tools = config.get("tools", [])
         expires_at = config.get("expires_at")
         expires_in = config.get("expires_in")

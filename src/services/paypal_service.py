@@ -13,13 +13,12 @@ https://developer.paypal.com/api/rest/#link-getclientidandclientsecret
 
 import logging
 import base64
-import json
-from datetime import datetime
 from typing import Optional, Dict, Any
 from urllib.parse import quote
 import httpx
 
 from src.services.mcp_oauth_service import MCPOAuthService
+from src.services.oauth_state import InvalidOAuthState, issue_state, verify_state
 
 logger = logging.getLogger(__name__)
 
@@ -137,18 +136,17 @@ class PayPalService(MCPOAuthService):
             Dictionary with success status, username, and user info
         """
         try:
-            # Verify state parameter
-            state_data = json.loads(
-                base64.urlsafe_b64decode(state.encode()).decode()
-            )
-
-            if state_data.get('agent_id') != agent_id:
+            try:
+                verify_state(state, agent_id, getattr(self, "oauth_caller", None))
+            except InvalidOAuthState as e:
+                logger.warning(f"[paypal] Rejected OAuth callback for agent {agent_id}: {e}")
                 return {
                     "success": False,
                     "error": "Invalid state parameter"
                 }
-            
-            mcp_url = state_data.get('mcp_url', self.mcp_url)
+
+            # Never from the callback: the state is client-supplied input.
+            mcp_url = self.mcp_url
             
             # Ensure we have client credentials
             if not self.client_id or not self.client_secret:
@@ -241,7 +239,7 @@ class PayPalService(MCPOAuthService):
 
                 access_token = token_result.get("access_token")
                 if not access_token:
-                    logger.error(f"[paypal] No access_token in response: {token_result}")
+                    logger.error(f"[paypal] No access_token in response, keys: {list(token_result.keys())}")
                     return {
                         "success": False,
                         "error": "No access token received from PayPal"
@@ -330,13 +328,13 @@ class PayPalService(MCPOAuthService):
             )
             return {
                 "success": False,
-                "error": f"HTTP error: {e.response.status_code} - {error_text[:200]}"
+                "error": "Failed to complete authorization"
             }
         except Exception as e:
             logger.error(f"[paypal] Error completing authorization: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": str(e)
+                "error": "Failed to complete authorization"
             }
 
     async def generate_authorization_url(
@@ -377,15 +375,7 @@ class PayPalService(MCPOAuthService):
         # Generate PKCE challenge (RFC 7636) - fast operation
         code_verifier, code_challenge = self._generate_pkce_challenge()
 
-        # Create state parameter with account and agent IDs
-        state_data = {
-            "agent_id": agent_id,
-            "mcp_url": self.mcp_url,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        state = base64.urlsafe_b64encode(
-            json.dumps(state_data).encode()
-        ).decode()
+        state = issue_state(agent_id, getattr(self, "oauth_caller", None))
 
         # Store code_verifier in memory (fast, always available)
         self._pkce_verifiers[state] = code_verifier

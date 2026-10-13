@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional
 import os
 from sqlalchemy.orm import Session
 from src.utils.logger import setup_logger
+from src.services.mcp_provider_endpoints import trusted_mcp_url
 
 logger = setup_logger(__name__)
 
@@ -30,7 +31,7 @@ async def get_linear_mcp_config(
     """
     # Default Linear MCP URL
     default_url = "https://mcp.linear.app/mcp"
-    url = mcp_url or default_url
+    url = trusted_mcp_url("linear", mcp_url, default_url)
 
     config = {
         "type": "http",

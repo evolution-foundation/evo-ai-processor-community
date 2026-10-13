@@ -9,10 +9,7 @@ Provides endpoints for:
 
 import logging
 import os
-import json
-import base64
 from typing import Optional, Dict, Any
-import httpx
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -28,6 +25,7 @@ from src.schemas.response_models import (
 
 from src.api.dependencies import get_current_user
 from src.api.oauth_redirect import derive_redirect_uri
+from src.api.oauth_caller import binds_oauth_caller
 from src.middleware.permissions import RequirePermission
 
 logger = logging.getLogger(__name__)
@@ -35,17 +33,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/agents/{agent_id}/integrations/monday",
     tags=["monday"],
-)
-
-# Callback router for fixed OAuth redirect URL (without account/agent IDs in path)
-callback_router = APIRouter(
-    prefix="/integrations/monday",
-    tags=["monday"],
-    responses={
-        200: {"description": "Authorization completed successfully"},
-        422: {"description": "Validation error"},
-        500: {"description": "Internal server error"},
-    },
 )
 
 
@@ -71,6 +58,7 @@ class CallbackResponse(BaseModel):
 
 
 # Dependency to get Monday service
+@binds_oauth_caller
 async def get_monday_service(
     request: Request
 ) -> MondayService:
@@ -207,9 +195,8 @@ async def generate_authorization(
     except Exception as e:
         logger.error(f"Error generating authorization URL: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to generate authorization URL: {str(e)}",
+            message="Failed to generate authorization URL",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -261,7 +248,7 @@ async def complete_authorization(
         )
 
         if not result.get("success"):
-            return error_response(request=request, code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
+            return error_response(code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
                 message=result.get("error", "Unknown error"),
                 status_code=status.HTTP_400_BAD_REQUEST
             )
@@ -274,17 +261,15 @@ async def complete_authorization(
     except ValueError as e:
         logger.error(f"Validation error in callback: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_422_UNPROCESSABLE_ENTITY),
-            message=str(e),
+            message="Invalid authorization request",
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY
         )
     except Exception as e:
         logger.error(f"Error completing authorization: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to complete authorization: {str(e)}",
+            message="Failed to complete authorization",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -491,200 +476,3 @@ async def disconnect(
             message=f"Failed to disconnect: {str(e)}",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
-
-# Fixed OAuth Callback Endpoint (for Monday OAuth App redirect)
-@callback_router.get(
-    "/callback",
-    response_model=SuccessResponse[OAuthCallbackResponse],
-    responses={
-        200: {"description": "Authorization completed successfully"},
-        422: {"model": ErrorResponse, "description": "Validation error"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
-)
-async def oauth_callback(
-    code: str,
-    state: str,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    """
-    OAuth 2.0 callback endpoint for Monday MCP (fixed URL).
-
-    This endpoint handles the OAuth redirect from Monday.
-    The agent_id is extracted from the state parameter.
-
-    Query Parameters:
-        code: Authorization code from Monday OAuth
-        state: Base64-encoded JSON containing agent_id and mcp_url
-    """
-    try:
-        # Decode state to extract agent_id and mcp_url
-        state_data = json.loads(
-            base64.urlsafe_b64decode(state.encode()).decode()
-        )
-
-        agent_id = state_data.get("agent_id")
-        mcp_url = state_data.get("mcp_url")
-
-        if not agent_id:
-            return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
-            message="Invalid state parameter: missing agent_id",
-            status_code=status.HTTP_400_BAD_REQUEST
-        )
-
-        # Get Monday service instance (create without user token for callback)
-        from src.services.global_config_service import get_global_config_service
-        
-        config_service = get_global_config_service()
-        credentials = await config_service.get_monday_credentials()
-        
-        client_id = credentials.get("client_id")
-        client_secret = credentials.get("client_secret")
-        redirect_uri = credentials.get("redirect_uri")
-        
-        if not redirect_uri:
-            return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
-            message="Monday OAuth credentials not configured",
-            status_code=status.HTTP_400_BAD_REQUEST
-        )
-        
-        core_service_url = os.getenv("CORE_SERVICE_URL", "http://localhost:5555/api/v1")
-        
-        # Try to load stored client credentials first (from previous dynamic registration)
-        # This is important because dynamic registration may have stored credentials
-        stored_client_id = None
-        stored_client_secret = None
-        stored_auth_method = None
-        stored_code_verifier = None
-        try:
-            integration_url = f"{core_service_url}/agents/{agent_id}/integrations/monday"
-            async with httpx.AsyncClient(timeout=10.0) as http_client:
-                integration_response = await http_client.get(integration_url)
-                if integration_response.status_code == 200:
-                    integration_data = integration_response.json()
-                    stored_config = integration_data.get("config", {})
-                    stored_client_id = stored_config.get("client_id")
-                    stored_client_secret = stored_config.get("client_secret")
-                    stored_auth_method = stored_config.get("token_endpoint_auth_method")
-                    
-                    # Try to load code_verifier from pkce_verifiers dict
-                    pkce_verifiers = stored_config.get("pkce_verifiers", {})
-                    stored_code_verifier = pkce_verifiers.get(state)
-                    
-                    logger.info(
-                        f"Loaded stored Monday credentials: "
-                        f"client_id={'set' if stored_client_id else 'not set'}, "
-                        f"auth_method={stored_auth_method}, "
-                        f"code_verifier={'set' if stored_code_verifier else 'not set'}"
-                    )
-        except Exception as load_error:
-            logger.debug(f"Could not load stored Monday credentials: {load_error}")
-        
-        # Use stored credentials if available, otherwise use global config
-        effective_client_id = stored_client_id or client_id
-        effective_client_secret = stored_client_secret or client_secret
-        
-        # Create service with empty user_token (not needed for callback)
-        # client_id and client_secret are optional - will be loaded from storage if not provided
-        service = MondayService(
-            client_id=effective_client_id,
-            client_secret=effective_client_secret,
-            redirect_uri=redirect_uri,
-            core_service_url=core_service_url,
-            user_token="",  # Not needed for callback
-            mcp_url=mcp_url
-        )
-        
-        # Set auth method if we loaded it from storage
-        if stored_auth_method:
-            service._token_endpoint_auth_method = stored_auth_method
-        
-        logger.info(
-            f"Monday callback: agent_id={agent_id}, "
-            f"client_id={'set' if effective_client_id else 'not set'}, "
-            f"client_secret={'set' if effective_client_secret else 'not set'}, "
-            f"auth_method={stored_auth_method or 'none'}"
-        )
-
-        # Complete authorization using extracted IDs
-        logger.info(
-            f"Monday callback: Starting authorization completion. "
-            f"agent_id={agent_id}, "
-            f"code_length={len(code) if code else 0}, "
-            f"state_length={len(state) if state else 0}, "
-            f"code_verifier={'set' if stored_code_verifier else 'not set'}"
-        )
-        
-        result = await service.complete_authorization(
-            agent_id=agent_id,
-            code=code,
-            state=state,
-            code_verifier=stored_code_verifier,
-            db=db
-        )
-
-        logger.info(
-            f"Monday callback: Authorization completed. "
-            f"success={result.get('success')}, "
-            f"error={result.get('error', 'none')}, "
-            f"username={result.get('username')}, "
-            f"email={result.get('email')}"
-        )
-        
-        # Verify that credentials were saved
-        if result.get("success"):
-            try:
-                credentials = await service._load_credentials(agent_id)
-                if credentials:
-                    has_token = bool(credentials.get("access_token"))
-                    logger.info(
-                        f"Monday callback: Credentials verification. "
-                        f"has_access_token={has_token}, "
-                        f"config_keys={list(credentials.keys())}"
-                    )
-                    if not has_token:
-                        logger.error(
-                            f"Monday callback: WARNING - Authorization succeeded but access_token was not saved! "
-                            f"Config: {credentials}"
-                        )
-                else:
-                    logger.error(
-                        f"Monday callback: WARNING - Authorization succeeded but no credentials found!"
-                    )
-            except Exception as verify_error:
-                logger.error(f"Monday callback: Error verifying credentials: {verify_error}")
-
-        if not result.get("success"):
-            return error_response(request=request, code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
-                message=result.get("error", "Unknown error"),
-                status_code=status.HTTP_400_BAD_REQUEST
-            )
-
-        return success_response(
-            data={"username": result.get("username"), "email": result.get("email")},
-            message="Authorization completed successfully"
-        )
-
-    except ValueError as e:
-        logger.error(f"Validation error in callback: {e}")
-        return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_422_UNPROCESSABLE_ENTITY),
-            message=str(e),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY
-        )
-    except Exception as e:
-        logger.error(f"Error completing authorization: {e}")
-        return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to complete authorization: {str(e)}",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-

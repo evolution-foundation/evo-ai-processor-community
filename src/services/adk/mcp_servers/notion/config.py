@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional
 import os
 from sqlalchemy.orm import Session
 from src.utils.logger import setup_logger
+from src.services.mcp_provider_endpoints import trusted_mcp_url
 
 logger = setup_logger(__name__)
 
@@ -30,7 +31,7 @@ async def get_notion_mcp_config(
     """
     # Default Notion MCP URL
     default_url = "https://mcp.notion.com/mcp"
-    url = mcp_url or default_url
+    url = trusted_mcp_url("notion", mcp_url, default_url)
 
     config = {
         "type": "http",

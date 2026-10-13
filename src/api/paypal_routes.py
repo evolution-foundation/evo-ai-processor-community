@@ -9,8 +9,6 @@ Provides endpoints for:
 
 import logging
 import os
-import json
-import base64
 from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request
@@ -28,6 +26,7 @@ from src.schemas.response_models import (
 
 from src.api.dependencies import get_current_user
 from src.api.oauth_redirect import derive_redirect_uri
+from src.api.oauth_caller import binds_oauth_caller
 from src.middleware.permissions import RequirePermission
 
 logger = logging.getLogger(__name__)
@@ -35,17 +34,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/agents/{agent_id}/integrations/paypal",
     tags=["paypal"],
-)
-
-# Callback router for fixed OAuth redirect URL (without account/agent IDs in path)
-callback_router = APIRouter(
-    prefix="/integrations/paypal",
-    tags=["paypal"],
-    responses={
-        200: {"description": "Authorization completed successfully"},
-        422: {"description": "Validation error"},
-        500: {"description": "Internal server error"},
-    },
 )
 
 
@@ -70,6 +58,7 @@ class CallbackResponse(BaseModel):
 
 
 # Dependency to get PayPal service
+@binds_oauth_caller
 async def get_paypal_service(
     request: Request
 ) -> PayPalService:
@@ -207,9 +196,8 @@ async def generate_authorization(
     except Exception as e:
         logger.error(f"Error generating authorization URL: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to generate authorization URL: {str(e)}",
+            message="Failed to generate authorization URL",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -245,7 +233,7 @@ async def complete_authorization(
         )
 
         if not result.get("success"):
-            return error_response(request=request, code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
+            return error_response(code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
                 message=result.get("error", "Unknown error"),
                 status_code=status.HTTP_400_BAD_REQUEST
             )
@@ -258,17 +246,15 @@ async def complete_authorization(
     except ValueError as e:
         logger.error(f"Validation error in callback: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_422_UNPROCESSABLE_ENTITY),
-            message=str(e),
+            message="Invalid authorization request",
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY
         )
     except Exception as e:
         logger.error(f"Error completing authorization: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to complete authorization: {str(e)}",
+            message="Failed to complete authorization",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -486,115 +472,5 @@ async def disconnect(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
             message=f"Failed to disconnect: {str(e)}",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-
-# Fixed OAuth Callback Endpoint (for PayPal OAuth App redirect)
-@callback_router.get(
-    "/callback",
-    response_model=SuccessResponse[OAuthCallbackResponse],
-    responses={
-        200: {"description": "Authorization completed successfully"},
-        422: {"model": ErrorResponse, "description": "Validation error"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
-)
-async def oauth_callback(
-    code: str,
-    state: str,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    """
-    OAuth 2.0 callback endpoint for PayPal MCP (fixed URL).
-
-    This endpoint handles the OAuth redirect from PayPal.
-    The agent_id is extracted from the state parameter.
-
-    Query Parameters:
-        code: Authorization code from PayPal OAuth
-        state: Base64-encoded JSON containing agent_id and mcp_url
-    """
-    try:
-        # Decode state to extract agent_id and mcp_url
-        state_data = json.loads(
-            base64.urlsafe_b64decode(state.encode()).decode()
-        )
-
-        agent_id = state_data.get("agent_id")
-        mcp_url = state_data.get("mcp_url")
-
-        if not agent_id:
-            return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
-            message="Invalid state parameter: missing agent_id",
-            status_code=status.HTTP_400_BAD_REQUEST
-        )
-
-        # Get PayPal service instance (create without user token for callback)
-        from src.services.global_config_service import get_global_config_service
-
-        config_service = get_global_config_service()
-        credentials = await config_service.get_paypal_credentials()
-
-        client_id = credentials.get("client_id")
-        client_secret = credentials.get("client_secret")
-        redirect_uri = credentials.get("redirect_uri")
-
-        if not client_id or not client_secret or not redirect_uri:
-            return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
-            message="PayPal OAuth credentials not configured. ",
-            status_code=status.HTTP_400_BAD_REQUEST
-        )
-
-        core_service_url = os.getenv("CORE_SERVICE_URL", "http://localhost:5555/api/v1")
-
-        # Create service with empty user_token (not needed for callback)
-        service = PayPalService(
-            redirect_uri=redirect_uri,
-            core_service_url=core_service_url,
-            user_token="",  # Not needed for callback
-            client_id=client_id,
-            client_secret=client_secret,
-            mcp_url=mcp_url
-        )
-
-        # Complete authorization using extracted IDs
-        result = await service.complete_authorization(
-            agent_id=agent_id,
-            code=code,
-            state=state,
-            db=db
-        )
-
-        if not result.get("success"):
-            return error_response(request=request, code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
-                message=result.get("error", "Unknown error"),
-                status_code=status.HTTP_400_BAD_REQUEST
-            )
-
-        return success_response(
-            data={"username": result.get("username"), "email": result.get("email")},
-            message="Authorization completed successfully"
-        )
-
-    except ValueError as e:
-        logger.error(f"Validation error in callback: {e}")
-        return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_422_UNPROCESSABLE_ENTITY),
-            message=str(e),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY
-        )
-    except Exception as e:
-        logger.error(f"Error completing authorization: {e}")
-        return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to complete authorization: {str(e)}",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )

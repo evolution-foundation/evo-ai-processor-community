@@ -18,6 +18,7 @@ from src.utils.mcp_discovery import _discover_async
 from src.utils.response import success_response, error_response, map_status_to_error_code
 from src.schemas.responses import SuccessResponse, ErrorResponse
 from src.schemas.response_models import IntegrationConfigResponse, DiscoverToolsResponse
+from src.services.mcp_provider_endpoints import trusted_mcp_url
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ async def discover_tools_endpoint(
             )
         
         access_token = config.get("access_token")
-        stored_mcp_url = config.get("mcp_url", mcp_url)
+        stored_mcp_url = trusted_mcp_url(provider, config.get("mcp_url"), mcp_url)
         
         # Enhanced logging for Stripe
         if provider.lower() == "stripe":
@@ -147,7 +148,6 @@ async def discover_tools_endpoint(
                 f"🔍 Stripe Discover Tools - Config loaded:\n"
                 f"  - Has access_token: {bool(access_token)}\n"
                 f"  - Token length: {len(access_token) if access_token else 0}\n"
-                f"  - Token preview: {access_token[:15] + '...' + access_token[-10:] if access_token and len(access_token) > 25 else (access_token[:20] if access_token else 'N/A')}\n"
                 f"  - Stored MCP URL: {stored_mcp_url}\n"
                 f"  - Config keys: {list(config.keys())}\n"
                 f"  - Has refresh_token: {bool(config.get('refresh_token'))}\n"

@@ -27,6 +27,7 @@ from src.schemas.response_models import (
 
 from src.api.dependencies import get_current_user
 from src.api.oauth_redirect import derive_redirect_uri
+from src.api.oauth_caller import binds_oauth_caller
 from src.middleware.permissions import RequirePermission
 
 logger = logging.getLogger(__name__)
@@ -34,17 +35,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/agents/{agent_id}/integrations/google-sheets",
     tags=["google-sheets"],
-)
-
-# Callback router for fixed OAuth redirect URL (without account/agent IDs in path)
-callback_router = APIRouter(
-    prefix="/integrations/google-sheets",
-    tags=["google-sheets"],
-    responses={
-        200: {"description": "Authorization completed successfully"},
-        422: {"description": "Validation error"},
-        500: {"description": "Internal server error"},
-    },
 )
 
 
@@ -105,6 +95,7 @@ class DisconnectResponse(BaseModel):
 
 
 # Dependency to get Google Sheets service
+@binds_oauth_caller
 async def get_google_sheets_service(
     request: Request
 ) -> GoogleSheetsService:
@@ -192,7 +183,7 @@ async def generate_authorization(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to generate authorization URL: {str(e)}",
+            message="Failed to generate authorization URL",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -252,7 +243,7 @@ async def complete_authorization(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_422_UNPROCESSABLE_ENTITY),
-            message=str(e),
+            message="Invalid authorization request",
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY
         )
     except Exception as e:
@@ -260,7 +251,7 @@ async def complete_authorization(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to complete authorization: {str(e)}",
+            message="Failed to complete authorization",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -400,93 +391,5 @@ async def disconnect(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
             message=f"Failed to disconnect Google Sheets: {str(e)}",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-
-# Fixed OAuth Callback Endpoint (for Google Cloud Console redirect)
-@callback_router.get(
-    "/callback",
-    response_model=SuccessResponse[GoogleSheetsCallbackResponse],
-    responses={
-        200: {"description": "Authorization completed successfully"},
-        422: {"model": ErrorResponse, "description": "Validation error"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
-)
-async def oauth_callback(
-    code: str,
-    state: str,
-    request: Request,
-    service: GoogleSheetsService = Depends(get_google_sheets_service),
-    db: Session = Depends(get_db)
-):
-    """
-    OAuth 2.0 callback endpoint for Google Sheets (fixed URL).
-
-    This endpoint handles the OAuth redirect from Google Cloud Console.
-    The agent_id is extracted from the state parameter.
-
-    Query Parameters:
-        code: Authorization code from Google OAuth
-        state: Base64-encoded JSON containing agent_id
-    """
-    try:
-        # Decode state to extract agent_id
-        import base64
-        import json
-
-        state_data = json.loads(
-            base64.urlsafe_b64decode(state.encode()).decode()
-        )
-
-        agent_id = state_data.get("agent_id")
-
-        if not agent_id:
-            return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
-            message="Invalid state parameter: missing agent_id",
-            status_code=status.HTTP_400_BAD_REQUEST
-        )
-
-        # Complete authorization using extracted IDs
-        result = await service.complete_authorization(
-            agent_id=agent_id,
-            code=code,
-            state=state,
-            db=db
-        )
-
-        if not result.get("success"):
-            return error_response(request=request, code=map_status_to_error_code(status.HTTP_400_BAD_REQUEST),
-                message=result.get("error", "Unknown error"),
-                status_code=status.HTTP_400_BAD_REQUEST
-            )
-
-        spreadsheets_data = [SpreadsheetItem(**sheet).model_dump() if isinstance(sheet, dict) else sheet.model_dump() if hasattr(sheet, 'model_dump') else sheet for sheet in result.get("spreadsheets", [])]
-        
-        return success_response(
-            data={
-                "email": result.get("email"),
-                "spreadsheets": spreadsheets_data
-            },
-            message="Authorization completed successfully"
-        )
-
-    except ValueError as e:
-        logger.error(f"Validation error in callback: {e}")
-        return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_422_UNPROCESSABLE_ENTITY),
-            message=str(e),
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY
-        )
-    except Exception as e:
-        logger.error(f"Error completing authorization: {e}")
-        return error_response(
-            request=request,
-            code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to complete authorization: {str(e)}",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
