@@ -219,12 +219,15 @@ def create_check_availability_tool(
                     config
                 )
 
+            timezone = get_config_value("timezone", "America/Sao_Paulo")
+
             # Otherwise, just check if the specific range is available
             result = await client.check_availability(
                 effective_credentials,
                 start_dt,
                 end_dt,
-                resolved_calendar_id
+                resolved_calendar_id,
+                timezone
             )
 
             if result["status"] == "error":
@@ -235,7 +238,6 @@ def create_check_availability_tool(
             within_business_hours = client.is_within_business_hours(start_dt, business_hours)
 
             # Check minimum advance time
-            timezone = get_config_value("timezone", "America/Sao_Paulo")
             min_advance_time = get_config_value("minAdvanceTime", 0)
             advance_time_ok = client.validate_advance_time(start_dt, min_advance_time, timezone)
 
@@ -383,7 +385,7 @@ def create_check_availability_tool(
         utc = ZoneInfo("UTC")
 
         events_result = await client.check_availability(
-            credentials_config, start_dt, end_dt, calendar_id
+            credentials_config, start_dt, end_dt, calendar_id, timezone
         )
         if events_result.get("status") == "error":
             return events_result

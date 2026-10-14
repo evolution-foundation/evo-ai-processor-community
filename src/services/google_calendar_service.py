@@ -41,7 +41,8 @@ class GoogleCalendarService:
         client_secret: str,
         redirect_uri: str,
         core_service_url: str,
-        user_token: str
+        user_token: str,
+        tenant_id: Optional[str] = None
     ):
         """
         Initialize Google Calendar service.
@@ -52,14 +53,21 @@ class GoogleCalendarService:
             redirect_uri: OAuth redirect URI
             core_service_url: Base URL for evo-ai-core-service API
             user_token: User authentication token for API calls
+            tenant_id: Tenant id forwarded to core-service (enterprise) as
+                X-Evo-Tenant-Id on internal integration calls.
         """
         self.client_id = client_id
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri
         self.core_service_url = core_service_url.rstrip('/')
         self.user_token = user_token
+        # Same as MCPOAuthService: the enterprise tenant middleware rejects
+        # internal calls without X-Evo-Tenant-Id (403, fail-closed).
+        client_headers = {"Authorization": f"Bearer {user_token}"}
+        if tenant_id:
+            client_headers["X-Evo-Tenant-Id"] = tenant_id
         self.http_client = httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {user_token}"},
+            headers=client_headers,
             timeout=30.0
         )
 

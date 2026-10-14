@@ -54,6 +54,20 @@ def _nexus_credential_ref(config):
     credential_id = config.get("credential_id")
     return {"nexus_api_key": credential_id} if credential_id else {}
 
+def _with_agent_timezone(calendar_config, agent_timezone):
+    """The calendar dialog never writes a timezone, so without this the tools fell
+    back to America/Sao_Paulo whatever timezone the agent itself was set to."""
+    if not agent_timezone:
+        return calendar_config
+    settings = calendar_config.get("settings")
+    if isinstance(settings, dict):
+        if settings.get("timezone"):
+            return calendar_config
+        return {**calendar_config, "settings": {**settings, "timezone": agent_timezone}}
+    if "settings" in calendar_config or calendar_config.get("timezone"):
+        return calendar_config
+    return {**calendar_config, "timezone": agent_timezone}
+
 def _apply_vault_refs(tool_config, headers, _db=None):
     """Resolves headers that point at the credential vault.
 
@@ -590,6 +604,10 @@ class ToolBuilder:
                 if not effective_agent_id:
                     logger.warning("Cannot create Google Calendar tools: agent_id not available")
                 else:
+                    google_calendar_config = _with_agent_timezone(
+                        google_calendar_config, agent_config.get("timezone")
+                    )
+
                     # Add check_availability tool with configs from agent.config.integrations
                     self.tools.append(
                         create_check_availability_tool(

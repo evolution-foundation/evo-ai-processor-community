@@ -186,7 +186,8 @@ class GoogleCalendarClient:
         credentials_config: Dict[str, Any],
         start_time: datetime,
         end_time: datetime,
-        calendar_id: str = "primary"
+        calendar_id: str = "primary",
+        timezone_str: str = "America/Sao_Paulo"
     ) -> Dict[str, Any]:
         """
         Check calendar availability for a time range.
@@ -196,6 +197,7 @@ class GoogleCalendarClient:
             start_time: Start of time range
             end_time: End of time range
             calendar_id: Calendar ID to check (default: primary)
+            timezone_str: Agent timezone that naive start/end times are in
 
         Returns:
             Dictionary with availability information
@@ -207,8 +209,8 @@ class GoogleCalendarClient:
             # Query events in the time range
             events_result = service.events().list(
                 calendarId=calendar_id,
-                timeMin=start_time.isoformat() + 'Z',
-                timeMax=end_time.isoformat() + 'Z',
+                timeMin=self._rfc3339(start_time, timezone_str),
+                timeMax=self._rfc3339(end_time, timezone_str),
                 singleEvents=True,
                 orderBy='startTime'
             ).execute()
@@ -226,6 +228,15 @@ class GoogleCalendarClient:
                 "status": "error",
                 "message": f"Google Calendar API error: {str(e)}"
             }
+
+    @staticmethod
+    def _rfc3339(value: datetime, timezone_str: str) -> str:
+        # Naive times are in the agent timezone, as everywhere else here. Sending
+        # them with a bare 'Z' shifted the window by the UTC offset, so the
+        # busy-event query missed the events the agent was asked about.
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=ZoneInfo(timezone_str))
+        return value.isoformat()
 
     async def create_event(
         self,

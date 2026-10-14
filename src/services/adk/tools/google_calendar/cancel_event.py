@@ -194,7 +194,7 @@ def create_cancel_event_tool(
 
             # List events in the window (single API call)
             result = await client.check_availability(
-                effective_credentials, start_dt, end_dt, resolved_calendar_id
+                effective_credentials, start_dt, end_dt, resolved_calendar_id, timezone
             )
             if result.get("status") == "error":
                 return result

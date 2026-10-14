@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from src.services.google_calendar_service import GoogleCalendarService
 from src.config.database import get_db
 from src.utils.response import success_response, error_response, map_status_to_error_code
+from src.core.error_codes import BUSINESS_RULE_VIOLATION
 from src.schemas.responses import SuccessResponse, ErrorResponse
 from src.schemas.response_models import (
     OAuthAuthorizationResponse, GoogleCalendarCallbackResponse, CalendarsListResponse,
@@ -169,12 +170,15 @@ async def get_google_calendar_service(
     client_secret = credentials.get("client_secret")
     redirect_uri = credentials.get("redirect_uri") or derive_redirect_uri(request, "google_calendar")
 
+    # Missing configuration, not a server fault: a 500 hid the cause from the screen.
     if not client_id or not client_secret or not redirect_uri:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Google Calendar OAuth credentials not configured in global_config. "
-                   "Please configure: google_calendar_client_id, google_calendar_client_secret, "
-                   "google_calendar_redirect_uri in the CRM global configuration."
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": BUSINESS_RULE_VIOLATION,
+                "error": "Google Calendar OAuth credentials are not configured. "
+                         "Add the Google Client ID and Client Secret in the CRM integrations.",
+            },
         )
 
     # Get core service URL from environment
@@ -195,7 +199,8 @@ async def get_google_calendar_service(
         client_secret=client_secret,
         redirect_uri=redirect_uri,
         core_service_url=core_service_url,
-        user_token=user_token
+        user_token=user_token,
+        tenant_id=cid
     )
 
 
@@ -210,7 +215,8 @@ async def get_google_calendar_service(
 )
 async def generate_authorization(
     agent_id: str,
-    request: AuthorizationRequest,
+    authorization_request: AuthorizationRequest,
+    request: Request,
     service: GoogleCalendarService = Depends(get_google_calendar_service),
     _permission: None = Depends(RequirePermission("integrations", "connect")),
     _: dict = Depends(get_current_user),
@@ -223,7 +229,7 @@ async def generate_authorization(
     try:
         url = service.generate_authorization_url(
             agent_id=agent_id,
-            email=request.email
+            email=authorization_request.email
         )
 
         return success_response(
@@ -252,7 +258,8 @@ async def generate_authorization(
 )
 async def complete_authorization(
     agent_id: str,
-    request: CallbackRequest,
+    callback_request: CallbackRequest,
+    request: Request,
     service: GoogleCalendarService = Depends(get_google_calendar_service),
     db: Session = Depends(get_db),
     _permission: None = Depends(RequirePermission("integrations", "connect")),
@@ -267,8 +274,8 @@ async def complete_authorization(
     try:
         result = await service.complete_authorization(
             agent_id=agent_id,
-            code=request.code,
-            state=request.state,
+            code=callback_request.code,
+            state=callback_request.state,
             db=db
         )
 
@@ -315,6 +322,7 @@ async def complete_authorization(
 )
 async def get_calendars(
     agent_id: str,
+    request: Request,
     service: GoogleCalendarService = Depends(get_google_calendar_service),
     db: Session = Depends(get_db),
     _permission: None = Depends(RequirePermission("integrations", "read")),
@@ -364,7 +372,8 @@ async def get_calendars(
 )
 async def save_configuration(
     agent_id: str,
-    request: ConfigurationRequest,
+    config_request: ConfigurationRequest,
+    request: Request,
     service: GoogleCalendarService = Depends(get_google_calendar_service),
     _permission: None = Depends(RequirePermission("integrations", "update")),
     _: dict = Depends(get_current_user),
@@ -375,7 +384,7 @@ async def save_configuration(
     Stores calendar selection and settings for the agent.
     """
     try:
-        config = request.dict(exclude_none=False)
+        config = config_request.dict(exclude_none=False)
 
         await service.save_configuration(
             agent_id=agent_id,
@@ -407,6 +416,7 @@ async def save_configuration(
 )
 async def disconnect(
     agent_id: str,
+    request: Request,
     service: GoogleCalendarService = Depends(get_google_calendar_service),
     _permission: None = Depends(RequirePermission("integrations", "disconnect")),
     _: dict = Depends(get_current_user),
@@ -448,7 +458,8 @@ async def disconnect(
 )
 async def check_availability(
     agent_id: str,
-    request: AvailabilityRequest,
+    availability_request: AvailabilityRequest,
+    request: Request,
     service: GoogleCalendarService = Depends(get_google_calendar_service),
     _permission: None = Depends(RequirePermission("integrations", "read")),
     _: dict = Depends(get_current_user),
@@ -461,9 +472,9 @@ async def check_availability(
     try:
         result = await service.check_availability(
             agent_id=agent_id,
-            calendar_id=request.calendarId,
-            start=request.start,
-            end=request.end
+            calendar_id=availability_request.calendarId,
+            start=availability_request.start,
+            end=availability_request.end
         )
 
         slots_data = [AvailabilitySlot(**slot).model_dump() if isinstance(slot, dict) else slot.model_dump() if hasattr(slot, 'model_dump') else slot for slot in result.get("slots", [])]
@@ -505,7 +516,8 @@ async def check_availability(
 )
 async def create_event(
     agent_id: str,
-    request: CreateEventRequest,
+    event_request: CreateEventRequest,
+    request: Request,
     service: GoogleCalendarService = Depends(get_google_calendar_service),
     _permission: None = Depends(RequirePermission("integrations", "create")),
     _: dict = Depends(get_current_user),
@@ -518,13 +530,13 @@ async def create_event(
     try:
         result = await service.create_event(
             agent_id=agent_id,
-            calendar_id=request.calendarId,
-            summary=request.summary,
-            start=request.start,
-            end=request.end,
-            description=request.description,
-            attendees=[att.dict() for att in request.attendees] if request.attendees else None,
-            meet_link=request.meetLink or False
+            calendar_id=event_request.calendarId,
+            summary=event_request.summary,
+            start=event_request.start,
+            end=event_request.end,
+            description=event_request.description,
+            attendees=[att.dict() for att in event_request.attendees] if event_request.attendees else None,
+            meet_link=event_request.meetLink or False
         )
 
         return success_response(
@@ -566,6 +578,7 @@ async def create_event(
     }
 )
 async def oauth_callback(
+    request: Request,
     code: str,
     state: str,
     service: GoogleCalendarService = Depends(get_google_calendar_service),

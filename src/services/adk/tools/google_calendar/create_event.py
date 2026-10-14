@@ -231,7 +231,8 @@ def create_calendar_event_tool(
                     effective_credentials,
                     start_dt,
                     end_dt,
-                    resolved_calendar_id
+                    resolved_calendar_id,
+                    timezone
                 )
 
                 if availability_result["status"] == "error":

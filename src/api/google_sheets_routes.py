@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from src.services.google_sheets_service import GoogleSheetsService
 from src.config.database import get_db
 from src.utils.response import success_response, error_response, map_status_to_error_code
+from src.core.error_codes import BUSINESS_RULE_VIOLATION
 from src.schemas.responses import SuccessResponse, ErrorResponse
 from src.schemas.response_models import (
     OAuthAuthorizationResponse, GoogleSheetsCallbackResponse, SpreadsheetsListResponse,
@@ -124,12 +125,15 @@ async def get_google_sheets_service(
     client_secret = credentials.get("client_secret")
     redirect_uri = credentials.get("redirect_uri") or derive_redirect_uri(request, "google_sheets")
 
+    # Missing configuration, not a server fault: a 500 hid the cause from the screen.
     if not client_id or not client_secret or not redirect_uri:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Google Sheets OAuth credentials not configured in global_config. "
-                   "Please configure: google_sheets_client_id, google_sheets_client_secret, "
-                   "google_sheets_redirect_uri in the CRM global configuration."
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": BUSINESS_RULE_VIOLATION,
+                "error": "Google Sheets OAuth credentials are not configured. "
+                         "Add the Google Client ID and Client Secret in the CRM integrations.",
+            },
         )
 
     # Get core service URL from environment
@@ -150,7 +154,8 @@ async def get_google_sheets_service(
         client_secret=client_secret,
         redirect_uri=redirect_uri,
         core_service_url=core_service_url,
-        user_token=user_token
+        user_token=user_token,
+        tenant_id=cid
     )
 
 
@@ -276,6 +281,7 @@ async def complete_authorization(
 )
 async def get_spreadsheets(
     agent_id: str,
+    request: Request,
     service: GoogleSheetsService = Depends(get_google_sheets_service),
     db: Session = Depends(get_db),
     _permission: None = Depends(RequirePermission("integrations", "read")),
