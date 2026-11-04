@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from src.utils.logger import setup_logger
 
 from src.services.agent_service import get_agent_integrations
+from src.services.mcp_provider_endpoints import trusted_mcp_url
 
 logger = setup_logger(__name__)
 
@@ -31,7 +32,7 @@ async def get_monday_mcp_config(
         Dictionary with MCP server configuration
     """
     default_url = "https://mcp.monday.com/mcp"
-    effective_url = mcp_url or default_url
+    effective_url = trusted_mcp_url("monday", mcp_url, default_url)
 
     config: Dict[str, Any] = {
         "type": "http",
@@ -56,7 +57,7 @@ async def get_monday_mcp_config(
                 integration_config = monday_integration.get("config", {})
                 access_token = integration_config.get("access_token")
                 tools = integration_config.get("tools", [])
-                mcp_url_from_config = integration_config.get("mcp_url", default_url)
+                mcp_url_from_config = trusted_mcp_url("monday", integration_config.get("mcp_url"), default_url)
 
                 logger.info(
                     f"Monday integration found for agent {agent_id}: "

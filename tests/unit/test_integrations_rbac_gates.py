@@ -1,10 +1,10 @@
 """EVO-1956 — Contract test for RBAC enforcement on integrations routes.
 
-Every route reachable on the main provider router (`router`) MUST carry a
-`RequirePermission("integrations", <verb>)` FastAPI dependency, and every
-route on the OAuth-redirect callback router (`callback_router`) MUST NOT —
-because the OAuth provider redirect is unauthenticated by design (browser
-flow, no CRM bearer token).
+Every route reachable on the provider router (`router`) MUST carry a
+`RequirePermission("integrations", <verb>)` FastAPI dependency. That includes
+the OAuth callback: the provider redirects the browser to the frontend, which
+completes the flow through the authenticated POST .../callback. No provider
+exposes a second, unauthenticated router.
 
 Verifying at the router level (not via HTTP) means we don't need to boot
 the middleware stack or mock auth service, and we catch regressions where
@@ -76,15 +76,14 @@ def _iter_permission_checkers(route) -> list[PermissionChecker]:
 
 
 def _load_routers():
-    """Return {provider_name: (main_router, callback_router or None)}."""
+    """Return {provider_name: main_router}."""
     out = {}
     for mod_path in PROVIDER_MODULES:
         mod = importlib.import_module(mod_path)
         provider = mod_path.rsplit(".", 1)[-1].removesuffix("_routes")
         main = getattr(mod, "router", None)
-        cb = getattr(mod, "callback_router", None)
         assert isinstance(main, APIRouter), f"{mod_path} missing `router` attribute"
-        out[provider] = (main, cb)
+        out[provider] = main
     return out
 
 
@@ -128,31 +127,22 @@ def test_every_main_router_endpoint_has_integrations_gate(provider_module):
 
 
 @pytest.mark.parametrize("provider_module", PROVIDER_MODULES)
-def test_callback_router_endpoints_stay_unauthenticated(provider_module):
-    """OAuth redirect callback endpoints are hit by the browser after the
-    external OAuth flow and CANNOT carry a bearer token; therefore they
-    MUST NOT be gated by RequirePermission or the OAuth flow breaks in
-    production. Regression guard for EVO-1956."""
+def test_provider_has_no_unauthenticated_callback_router(provider_module):
+    """The GET callbacks read the agent and the MCP endpoint from the OAuth
+    state and ran outside RequirePermission. They are gone; this keeps them
+    from coming back."""
     mod = importlib.import_module(provider_module)
-    cb = getattr(mod, "callback_router", None)
-    if cb is None:
-        pytest.skip(f"{provider_module} has no callback_router")
 
-    gated: list[str] = []
-    for route in cb.routes:
-        checkers = _iter_permission_checkers(route)
-        if checkers:
-            gated.append(
-                f"{list(getattr(route, 'methods', {'?'}))} "
-                f"{getattr(route, 'path', route.name)} -> "
-                f"{[(c.resource, c.action) for c in checkers]}"
-            )
+    assert not hasattr(mod, "callback_router")
 
-    assert not gated, (
-        f"{provider_module}: OAuth callback_router routes MUST stay "
-        f"unauthenticated (browser redirect flow):\n  - " +
-        "\n  - ".join(gated)
-    )
+
+@pytest.mark.parametrize("provider_module", PROVIDER_MODULES)
+def test_oauth_callback_is_the_gated_post(provider_module):
+    mod = importlib.import_module(provider_module)
+    callbacks = [r for r in mod.router.routes if getattr(r, "path", "").endswith("/callback")]
+
+    assert [sorted(r.methods) for r in callbacks] == [["POST"]]
+    assert [(c.resource, c.action) for c in _iter_permission_checkers(callbacks[0])] == [("integrations", "connect")]
 
 
 def test_bulk_integrations_route_is_gated():
@@ -170,5 +160,3 @@ def test_bulk_integrations_route_is_gated():
             f"integrations_routes: {getattr(route, 'path', route.name)} "
             "gated by wrong resource"
         )
-
-

@@ -43,6 +43,7 @@ from src.schemas.schemas import Agent
 from src.utils.adk_utils import extract_state_params
 from src.utils.logger import setup_logger
 from src.services.agent_service import get_agent
+from src.services.mcp_provider_endpoints import trusted_mcp_url
 from src.services.adk.tool_builder import ToolBuilder
 from src.services.adk.mcp_service import MCPService
 from src.utils.schema_utils import json_schema_to_pydantic, validate_output_schema
@@ -58,6 +59,26 @@ from .agent_utils import (
 )
 
 logger = setup_logger(__name__)
+
+INTEGRATION_MCP_URLS = {
+    "notion": "https://mcp.notion.com/mcp",
+    "stripe": "https://mcp.stripe.com",  # Stripe does NOT use /mcp endpoint
+    "linear": "https://mcp.linear.app/mcp",
+    "monday": "https://mcp.monday.com/mcp",
+    "atlassian": "https://mcp.atlassian.com/mcp",
+    "asana": "https://mcp.asana.com/mcp",
+    "hubspot": "https://mcp.hubspot.com/mcp",
+    "github": "https://api.githubcopilot.com/mcp",
+}
+
+
+def integration_mcp_url_for(provider: str, integration_config: Dict[str, Any]) -> str:
+    """The MCP URL a connected integration's tools are loaded from."""
+    return trusted_mcp_url(
+        provider,
+        integration_config.get("mcp_url"),
+        INTEGRATION_MCP_URLS.get(provider, ""),
+    )
 
 
 class GeminiWithApiKey(Gemini):
@@ -582,22 +603,11 @@ class LlmAgentBuilder:
                 f"(loaded from database)"
             )
             
-            mcp_urls = {
-                "notion": "https://mcp.notion.com/mcp",
-                "stripe": "https://mcp.stripe.com",  # Stripe does NOT use /mcp endpoint
-                "linear": "https://mcp.linear.app/mcp",
-                "monday": "https://mcp.monday.com/mcp",
-                "atlassian": "https://mcp.atlassian.com/mcp",
-                "asana": "https://mcp.asana.com/mcp",
-                "hubspot": "https://mcp.hubspot.com/mcp",
-                "github": "https://api.githubcopilot.com/mcp"
-            }
-            
             for integration in integrations_list:
                 provider = integration.get("provider", "").lower()
                 logger.debug(
                     f"Checking integration: provider={provider}, "
-                    f"config={integration.get('config', {})}"
+                    f"config keys={list(integration.get('config', {}).keys())}"
                 )
                 
                 if provider in integration_providers:
@@ -622,8 +632,7 @@ class LlmAgentBuilder:
                         )
                         
                         if is_connected:
-                            # Use mcp_url from integration config if available, otherwise use default
-                            integration_mcp_url = integration_config.get("mcp_url") or mcp_urls.get(provider, "")
+                            integration_mcp_url = integration_mcp_url_for(provider, integration_config)
                             
                             # Add MCP server for this connected integration
                             integration_mcp = {

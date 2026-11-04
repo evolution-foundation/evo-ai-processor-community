@@ -8,13 +8,14 @@ This service handles:
 - Configuration storage
 """
 
-import json
 import logging
 import os
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import httpx
+
+from src.services.oauth_state import issue_state, verify_state
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -96,16 +97,7 @@ class GoogleSheetsService:
             redirect_uri=self.redirect_uri
         )
 
-        # Create state parameter with account and agent IDs
-        # We'll use a simple JWT-like encoding
-        import base64
-        state_data = {
-            "agent_id": agent_id,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        state = base64.urlsafe_b64encode(
-            json.dumps(state_data).encode()
-        ).decode()
+        state = issue_state(agent_id, getattr(self, "oauth_caller", None))
 
         # Generate authorization URL
         authorization_url, _ = flow.authorization_url(
@@ -137,14 +129,7 @@ class GoogleSheetsService:
             Dictionary with success status, email, and spreadsheets
         """
         try:
-            # Verify state parameter
-            import base64
-            state_data = json.loads(
-                base64.urlsafe_b64decode(state.encode()).decode()
-            )
-
-            if state_data.get('agent_id') != agent_id:
-                raise ValueError("Invalid state parameter")
+            verify_state(state, agent_id, getattr(self, "oauth_caller", None))
 
             # Manual token exchange without scope validation
             # Google may return normalized scopes (e.g., "email" -> "userinfo.email")
@@ -168,10 +153,10 @@ class GoogleSheetsService:
             )
 
             logger.info(f"Token exchange response status: {token_response.status_code}")
-            logger.info(f"Token exchange response: {token_response.text[:200]}")
 
             if token_response.status_code != 200:
-                raise Exception(f"Token exchange failed: {token_response.text}")
+                logger.error(f"Token exchange failed: status={token_response.status_code}, body={token_response.text[:500]}")
+                raise Exception(f"Token exchange failed with status {token_response.status_code}")
 
             token_data = token_response.json()
 
@@ -210,7 +195,7 @@ class GoogleSheetsService:
             logger.error(f"Error completing Google Sheets authorization: {e}")
             return {
                 "success": False,
-                "error": str(e)
+                "error": "Failed to complete authorization"
             }
 
     async def get_spreadsheets(

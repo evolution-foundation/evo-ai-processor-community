@@ -8,6 +8,7 @@ It fetches OAuth credentials from the agent's integration configuration.
 import logging
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
+from src.services.mcp_provider_endpoints import trusted_mcp_url
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ async def get_atlassian_mcp_config(
             if atlassian_integration:
                 integration_config = atlassian_integration.get("config", {})
                 access_token = integration_config.get("access_token")
-                mcp_url = integration_config.get("mcp_url", default_url)
+                mcp_url = trusted_mcp_url("atlassian", integration_config.get("mcp_url"), default_url)
                 tools = integration_config.get("tools", [])
 
                 if access_token:

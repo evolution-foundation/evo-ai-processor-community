@@ -11,7 +11,6 @@ This service implements the MCP OAuth Protected Resource discovery pattern:
 This pattern is standard for MCP servers that require OAuth authentication.
 """
 
-import json
 import logging
 import base64
 import hashlib
@@ -22,6 +21,8 @@ from datetime import datetime
 from urllib.parse import urlunsplit, urlsplit, quote
 
 import httpx
+
+from src.services.oauth_state import InvalidOAuthState, issue_state, verify_state
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,8 @@ class MCPOAuthService:
         self.core_service_url = core_service_url.rstrip('/')
         self.user_token = user_token
         self.tenant_id = tenant_id
+        # Who started/completes the OAuth flow; set by the route dependency.
+        self.oauth_caller = None
         # The browser reaches core-service through the CRM, which supplies
         # X-Evo-Tenant-Id; the processor's internal calls must carry the same
         # header or the enterprise tenant middleware rejects them (403 forbidden,
@@ -765,15 +768,7 @@ class MCPOAuthService:
         # Generate PKCE challenge (RFC 7636)
         code_verifier, code_challenge = self._generate_pkce_challenge()
 
-        # Create state parameter with account and agent IDs
-        state_data = {
-            "agent_id": agent_id,
-            "mcp_url": self.mcp_url,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        state = base64.urlsafe_b64encode(
-            json.dumps(state_data).encode()
-        ).decode()
+        state = issue_state(agent_id, getattr(self, "oauth_caller", None))
 
         # Store code_verifier in memory AND in storage for callback
         self._pkce_verifiers[state] = code_verifier
@@ -893,18 +888,17 @@ class MCPOAuthService:
             Dictionary with success status, username, and user info
         """
         try:
-            # Verify state parameter
-            state_data = json.loads(
-                base64.urlsafe_b64decode(state.encode()).decode()
-            )
-
-            if state_data.get('agent_id') != agent_id:
+            try:
+                verify_state(state, agent_id, getattr(self, "oauth_caller", None))
+            except InvalidOAuthState as e:
+                logger.warning(f"[{self.provider_name}] Rejected OAuth callback for agent {agent_id}: {e}")
                 return {
                     "success": False,
                     "error": "Invalid state parameter"
                 }
-            
-            mcp_url = state_data.get('mcp_url', self.mcp_url)
+
+            # Never from the callback: the state is client-supplied input.
+            mcp_url = self.mcp_url
             
             # Get OAuth metadata if not cached
             if not self._oauth_metadata:
@@ -1222,15 +1216,9 @@ class MCPOAuthService:
                         f"[{self.provider_name}] Token exchange successful, response keys: {list(token_result.keys())}"
                     )
 
-                    # Log FULL token response for PayPal debugging (to understand login: token format)
-                    if self.provider_name == "paypal":
-                        logger.warning(
-                            f"[paypal] Full token response from PayPal: {token_result}"
-                        )
-
                     access_token = token_result.get("access_token")
                     if not access_token:
-                        logger.error(f"[{self.provider_name}] No access_token in response: {token_result}")
+                        logger.error(f"[{self.provider_name}] No access_token in response, keys: {list(token_result.keys())}")
                         return {
                             "success": False,
                             "error": "No access token received from OAuth provider"
@@ -1247,9 +1235,8 @@ class MCPOAuthService:
                             f"(2) Missing required configuration/scopes, or "
                             f"(3) PayPal MCP requires special app setup."
                         )
-                        # Log the full response to help debug
                         logger.error(
-                            f"[{self.provider_name}] Full token response for debugging: {token_result}"
+                            f"[{self.provider_name}] Token response keys: {list(token_result.keys())}"
                         )
                     
                     # Detect REST API keys for Stripe (should not be used with MCP)
@@ -1269,13 +1256,10 @@ class MCPOAuthService:
                         }
 
                     # Enhanced logging for Stripe OAuth success
-                    token_preview = f"{access_token[:15]}...{access_token[-10:]}" if len(access_token) > 25 else access_token[:25]
                     logger.info(
                         f"✅ [{self.provider_name.upper()}] OAuth Login SUCCESSFUL!\n"
                         f"  - Token obtained successfully\n"
                         f"  - Token length: {len(access_token)}\n"
-                        f"  - Token preview: {token_preview}\n"
-                        f"  - Token starts with: {access_token[:20]}\n"
                         f"  - Agent ID: {agent_id}\n"
                         f"  - MCP URL: {mcp_url}"
                     )
@@ -1285,11 +1269,9 @@ class MCPOAuthService:
                     expires_in = token_result.get("expires_in")
                     
                     if refresh_token:
-                        refresh_preview = f"{refresh_token[:15]}...{refresh_token[-10:]}" if len(refresh_token) > 25 else refresh_token[:25]
                         logger.info(
                             f"✅ [{self.provider_name}] Refresh token received:\n"
-                            f"  - Length: {len(refresh_token)}\n"
-                            f"  - Preview: {refresh_preview}"
+                            f"  - Length: {len(refresh_token)}"
                         )
                     else:
                         logger.warning(
@@ -1408,13 +1390,13 @@ class MCPOAuthService:
             )
             return {
                 "success": False,
-                "error": f"HTTP error: {e.response.status_code} - {error_text}"
+                "error": "Failed to complete authorization"
             }
         except Exception as e:
             logger.error(f"Error completing authorization: {e}")
             return {
                 "success": False,
-                "error": str(e)
+                "error": "Failed to complete authorization"
             }
 
     async def _store_pkce_verifier(
@@ -2136,14 +2118,10 @@ class MCPOAuthService:
             )
         
         original_token = credentials.get("access_token")
-        original_token_preview = f"{original_token[:15]}...{original_token[-10:]}" if len(original_token) > 25 else original_token[:25]
-        
         logger.info(
             f"📋 [{self.provider_name}] Loaded credentials:\n"
             f"  - Has access_token: True\n"
-            f"  - Token length: {len(original_token)}\n"
-            f"  - Token preview: {original_token_preview}\n"
-            f"  - Token starts with: {original_token[:20]}"
+            f"  - Token length: {len(original_token)}"
         )
         
         # Check token expiration before refresh
@@ -2200,20 +2178,15 @@ class MCPOAuthService:
                 f"  - This may cause 'Session terminated' error if token is expired"
             )
         elif access_token != original_token:
-            new_token_preview = f"{access_token[:15]}...{access_token[-10:]}" if len(access_token) > 25 else access_token[:25]
             logger.info(
                 f"✅ [{self.provider_name}] Token refreshed successfully:\n"
-                f"  - New token length: {len(access_token)}\n"
-                f"  - New token preview: {new_token_preview}"
+                f"  - New token length: {len(access_token)}"
             )
         
         # Final validation before returning headers
-        token_preview = f"{access_token[:15]}...{access_token[-10:]}" if len(access_token) > 25 else access_token[:25]
         logger.info(
             f"✅ [{self.provider_name}] MCP Headers ready:\n"
-            f"  - Authorization header: Bearer {token_preview}\n"
             f"  - Token length: {len(access_token)}\n"
-            f"  - Token starts with: {access_token[:20]}\n"
             f"  - Will be used for MCP requests to: {effective_mcp_url}"
         )
         
