@@ -1,11 +1,8 @@
 """
 The MCP endpoints the built-in integrations are allowed to talk to.
 
-The integration config stored for an agent can be written outside the OAuth
-callback (the configuration PUT merges whatever the body brings, and configs
-written before the callback was fixed may hold anything), and the runtime sends
-the integration's Bearer token to the URL it resolves. For the built-in
-providers that URL is never taken from storage unless it is one of the
+The runtime sends an integration's Bearer token to the URL it resolves, so for
+the built-in providers a stored MCP URL is used only when it is one of the
 provider's own endpoints. Custom MCP servers are not in this table and keep
 their configured URL.
 """
