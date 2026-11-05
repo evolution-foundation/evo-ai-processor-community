@@ -4,7 +4,9 @@ secret encrypted and is pointed at by `credential_id`.
 Two rules this module keeps: resolution is BY ID only, because precedence
 between scopes has a single owner in the CRM resolver; and the inline value
 stays the fallback, so an unresolvable reference only fails when there is
-nothing to fall back to.
+nothing to fall back to. A consumer with NO reference keeps its inline secret
+only until the installation records the migration: after it, that secret is one
+the user unlinked.
 
 Free of heavy imports so it can be unit tested without the ADK stack; the
 database and crypto handles are injected by the caller.
@@ -36,6 +38,16 @@ SECRET_FIELDS_BY_PROVIDER: Dict[str, Tuple[str, ...]] = {
     # absence reads as a decision, not as an oversight someone should "fix".
     "typebot": (),
 }
+
+# Written by the CRM's integration_credentials:migrate, in the same database.
+# Credentials are deleted for real, so counting imported rows or pending inline
+# secrets cannot tell "migrated and later unlinked" from "never migrated".
+INTEGRATION_MIGRATED_FLAG = "INTEGRATION_CREDENTIALS_MIGRATED"
+
+# Same list the CRM migration imports from and the core counts as pending.
+AUTH_HEADER_NAMES = frozenset(
+    {"authorization", "x-api-key", "api-key", "apikey", "x-auth-token"}
+)
 
 
 class CredentialVault(Protocol):
@@ -76,18 +88,89 @@ class DatabaseCredentialVault:
         return {"kind": row[0], "value": row[1], "value_format": row[2]}
 
 
+def integration_migrated(db) -> bool:
+    """Whether the installation recorded that its integration secrets moved to
+    the vault. Only a JSON `true` counts, and a failed read answers no: reading
+    an error as "migrated" would cut the inline fallback on a broken install.
+    """
+    from sqlalchemy import text
+
+    try:
+        row = db.execute(
+            text(
+                "SELECT serialized_value -> 'value' FROM installation_configs "
+                "WHERE name = :name LIMIT 1"
+            ),
+            {"name": INTEGRATION_MIGRATED_FLAG},
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001 - fail closed: keep the inline fallback
+        logger.error("Failed to read %s: %s", INTEGRATION_MIGRATED_FLAG, exc)
+        return False
+
+    return bool(row) and row[0] is True
+
+
+def installation_integration_migrated() -> bool:
+    """`integration_migrated` on a short-lived session of its own, so a failed
+    read never aborts the transaction of the caller's session."""
+    try:
+        from src.config.database import SessionLocal
+
+        session = SessionLocal()
+    except Exception as exc:  # noqa: BLE001 - fail closed: keep the inline fallback
+        logger.error("Failed to open a session to read %s: %s", INTEGRATION_MIGRATED_FLAG, exc)
+        return False
+
+    try:
+        return integration_migrated(session)
+    finally:
+        session.close()
+
+
+def retire_unreferenced_auth_headers(
+    headers: Dict[str, Any],
+    credential_refs: Dict[str, str],
+    migrated: Callable[[], bool],
+) -> Dict[str, Any]:
+    """Drops the auth headers no vault reference covers once the installation
+    migrated: there, an inline auth header is one the user unlinked, not one
+    still waiting for the migration.
+
+    `migrated` is only asked when such a header exists, so a tool that is fully
+    on the vault, or has no auth header, costs no extra read.
+    """
+    headers = headers or {}
+    refs = credential_refs or {}
+    retired = [
+        name
+        for name, value in headers.items()
+        if value and str(name).lower() in AUTH_HEADER_NAMES and not refs.get(name)
+    ]
+    if not retired or not migrated():
+        return headers
+
+    logger.warning(
+        "Not sending inline auth header(s) %s: the installation migrated to the "
+        "credential vault and no credential is linked to them",
+        sorted(retired),
+    )
+    return {name: value for name, value in headers.items() if name not in retired}
+
+
 def apply_vault_credential(
     provider: str,
     config: Dict[str, Any],
     vault: CredentialVault,
     decrypt: Callable[[str], Optional[str]],
+    migrated: Callable[[], bool] = installation_integration_migrated,
 ) -> Dict[str, Any]:
     """Returns a config whose secret fields come from the vault when a usable
     reference is present, and from the inline value otherwise.
 
-    Raises only when a vault credential was asked for, could not be resolved,
-    and there is nothing inline: an empty secret fails further away, with a
-    worse message.
+    Raises when a vault credential was asked for, could not be resolved, and
+    there is nothing inline; and when no credential is linked on a migrated
+    installation, whose inline value is one the user unlinked. An empty secret
+    fails further away, with a worse message.
     """
     resolved = dict(config)
 
@@ -97,6 +180,12 @@ def apply_vault_credential(
 
     credential_id = resolved.get("credential_id")
     if not credential_id:
+        if _has_inline_secret(resolved, secret_fields) and migrated():
+            raise ValueError(
+                f"provider '{provider}' has no credential linked, and its inline "
+                "value is no longer used since the installation migrated to the "
+                "credential vault"
+            )
         return resolved
 
     secret, reason = _fetch_secret(credential_id, vault, decrypt)

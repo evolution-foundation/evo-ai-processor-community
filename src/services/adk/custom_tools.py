@@ -150,17 +150,24 @@ def _apply_vault_refs(tool_config, headers, _db=None):
 
     Opens its own short-lived session because neither tool builder carries one.
     Any failure falls back to the inline headers, so a vault outage degrades to
-    today's behaviour instead of breaking the tool.
+    today's behaviour instead of breaking the tool. An auth header with no
+    reference is not sent once the installation migrated.
     """
+    from src.services.adk.integration_credentials import (
+        DatabaseCredentialVault,
+        installation_integration_migrated,
+        resolve_credential_refs,
+        retire_unreferenced_auth_headers,
+    )
+
     credential_refs = tool_config.get("credential_refs") or {}
+    headers = retire_unreferenced_auth_headers(
+        headers, credential_refs, migrated=installation_integration_migrated
+    )
     if not credential_refs:
         return headers
 
     from src.config.database import SessionLocal
-    from src.services.adk.integration_credentials import (
-        DatabaseCredentialVault,
-        resolve_credential_refs,
-    )
     from src.utils.crypto import decrypt_api_key
 
     session = SessionLocal()
@@ -392,6 +399,7 @@ class CustomToolBuilder:
                         "method": custom_tool.method,
                         "endpoint": custom_tool.endpoint,
                         "headers": custom_tool.headers or {},
+                        "credential_refs": getattr(custom_tool, "credential_refs", None) or {},
                         "parameters": {
                             "path_params": custom_tool.path_params or {},
                             "query_params": custom_tool.query_params or {},

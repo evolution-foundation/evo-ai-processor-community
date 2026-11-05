@@ -993,16 +993,23 @@ def _resolve_mcp_headers(custom_server, db):
 
     A vault outage, or an unresolvable reference with an inline value present,
     degrades to today's behaviour, so nothing breaks before the 2.6 migration.
+    An auth header with no reference is not sent once the installation migrated.
     """
+    from src.services.adk.integration_credentials import (
+        DatabaseCredentialVault,
+        installation_integration_migrated,
+        resolve_credential_refs,
+        retire_unreferenced_auth_headers,
+    )
+
     headers = custom_server.headers or {}
     credential_refs = getattr(custom_server, "credential_refs", None) or {}
+    headers = retire_unreferenced_auth_headers(
+        headers, credential_refs, migrated=installation_integration_migrated
+    )
     if not credential_refs:
         return headers
 
-    from src.services.adk.integration_credentials import (
-        DatabaseCredentialVault,
-        resolve_credential_refs,
-    )
     from src.utils.crypto import decrypt_api_key
 
     return resolve_credential_refs(

@@ -34,6 +34,7 @@ import json
 import urllib.parse
 from src.utils.logger import setup_logger
 from src.utils.tool_naming import sanitize_tool_name, unique_tool_name
+from src.services.adk.integration_credentials import installation_integration_migrated
 from src.services.adk.custom_tools import (
     CustomToolBuilder,
     declare_body_params,
@@ -59,17 +60,24 @@ def _apply_vault_refs(tool_config, headers, _db=None):
 
     Opens its own short-lived session because neither tool builder carries one.
     Any failure falls back to the inline headers, so a vault outage degrades to
-    today's behaviour instead of breaking the tool.
+    today's behaviour instead of breaking the tool. An auth header with no
+    reference is not sent once the installation migrated.
     """
+    from src.services.adk.integration_credentials import (
+        DatabaseCredentialVault,
+        installation_integration_migrated,
+        resolve_credential_refs,
+        retire_unreferenced_auth_headers,
+    )
+
     credential_refs = tool_config.get("credential_refs") or {}
+    headers = retire_unreferenced_auth_headers(
+        headers, credential_refs, migrated=installation_integration_migrated
+    )
     if not credential_refs:
         return headers
 
     from src.config.database import SessionLocal
-    from src.services.adk.integration_credentials import (
-        DatabaseCredentialVault,
-        resolve_credential_refs,
-    )
     from src.utils.crypto import decrypt_api_key
 
     session = SessionLocal()
@@ -493,8 +501,16 @@ class ToolBuilder:
                 # Only the key goes to the vault: nexus_base_url and space_id
                 # are the address, and keeping them out is what lets one
                 # credential serve agents pointing at different spaces.
+                nexus_refs = _nexus_credential_ref(knowledge_nexus_config)
+                if api_key and not nexus_refs and installation_integration_migrated():
+                    logger.warning(
+                        "knowledge-nexus: no credential linked, and the inline key "
+                        "is no longer used since the installation migrated to the "
+                        "credential vault"
+                    )
+                    api_key = None
                 api_key = _apply_vault_refs(
-                    {"credential_refs": _nexus_credential_ref(knowledge_nexus_config)},
+                    {"credential_refs": nexus_refs},
                     {"nexus_api_key": api_key},
                 ).get("nexus_api_key")
                 space_id = (
