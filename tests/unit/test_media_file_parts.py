@@ -59,21 +59,46 @@ def test_image_is_appended_to_file_parts():
     assert transcribed == []
 
 
-def test_audio_still_appended():
-    parts, _ = _run(
-        _utils().process_files([_file("voice.ogg", "audio/ogg")], _artifacts(), "a", "e", "s")
+def test_audio_is_not_inlined_as_a_model_part():
+    # EVO-2227: audio never travels as a raw model part (google-adk emits an
+    # audio_url part litellm rejects -> 500). It is transcribed instead. Without
+    # a db (self.db unset here) transcription is a no-op, so parts AND transcript
+    # are both empty -- but the file is still archived.
+    artifacts = _artifacts()
+    parts, transcribed = _run(
+        _utils().process_files([_file("voice.ogg", "audio/ogg")], artifacts, "a", "e", "s")
     )
-    assert len(parts) == 1
-    assert parts[0].inline_data.mime_type == "audio/ogg"
+    assert parts == []
+    assert transcribed == []
+    artifacts.save_artifact.assert_awaited_once()  # still kept for reference
 
 
-def test_image_and_audio_both_appended():
+def test_only_the_image_is_inlined_next_to_audio():
+    # The image inlines natively; the audio is routed to transcription (a no-op
+    # here) and never becomes a model part.
     parts, _ = _run(
         _utils().process_files(
             [_file("p.png", "image/png"), _file("v.ogg", "audio/ogg")], _artifacts(), "a", "e", "s"
         )
     )
-    assert len(parts) == 2
+    assert [p.inline_data.mime_type for p in parts] == ["image/png"]
+
+
+def test_audio_transcript_is_returned_and_not_inlined(monkeypatch):
+    # With a working transcriber, the audio yields transcribed text (which the
+    # runner folds into the message) and still no raw model part.
+    from unittest.mock import AsyncMock
+
+    import src.services.adk.runners.runner_utils as ru
+
+    monkeypatch.setattr(ru, "transcribe_audio_file", AsyncMock(return_value="olá do áudio"))
+    utils = _utils()
+    utils.db = MagicMock()  # transcribe_audio_file is mocked; db is only passed through
+    parts, transcribed = _run(
+        utils.process_files([_file("voice.ogg", "audio/ogg")], _artifacts(), "agent", "ext", "sess")
+    )
+    assert parts == []
+    assert transcribed == ["olá do áudio"]
 
 
 def test_create_content_with_image_only_is_not_none():
@@ -128,13 +153,14 @@ def test_pdf_and_text_still_reach_the_model():
     assert [p.inline_data.mime_type for p in parts] == ["application/pdf", "text/plain"]
 
 
-def test_mime_parameters_do_not_break_the_check():
-    parts, _ = _run(
+def test_mime_parameters_do_not_break_audio_detection():
+    # "audio/webm;codecs=opus" (what WhatsApp/browsers actually send) must still
+    # be recognized as audio -> routed to transcription, never inlined as a part.
+    parts, transcribed = _run(
         _utils().process_files([_file("v.webm", "audio/webm;codecs=opus")], _artifacts(), "a", "e", "s")
     )
-    # The prefix still matches with the parameter attached, and ADK reads the
-    # verbatim value off the Blob, so the two agree.
-    assert [p.inline_data.mime_type for p in parts] == ["audio/webm;codecs=opus"]
+    assert parts == []
+    assert transcribed == []  # no db here -> transcription is a no-op
 
 
 # The guard must judge the mime exactly as ADK will, because ADK is what raises.
@@ -196,20 +222,23 @@ def test_inline_budget_is_per_request(monkeypatch):
     assert len(parts) == 1
 
 
-def test_every_forwarded_part_is_accepted_by_the_installed_adk():
-    """Pins the allowlist to what google-adk actually converts.
+def test_every_forwarded_part_is_accepted_by_adk_and_litellm():
+    """Pins the allowlist to what BOTH layers accept.
 
-    `_get_content` is what raises the ValueError the runner turns into a 500. If
-    an ADK bump narrows the accepted set, this fails here instead of in front of
-    a customer.
+    `_get_content` (ADK) converts the parts; litellm's
+    `validate_chat_completion_user_messages` then guards the request. The old
+    test only exercised ADK, which happily produces an `audio_url` part -- and
+    litellm rejects that downstream with a 500. Audio is therefore no longer a
+    forwarded part (it is transcribed); the samples here are exactly what may
+    still travel as raw model parts, and both layers must accept them.
     """
+    from litellm.utils import validate_chat_completion_user_messages
+
     utils = _utils()
     samples = [
         "image/png",
         "image/jpeg",
         "image/webp",
-        "audio/ogg",
-        "audio/mpeg",
         "video/mp4",
         "text/plain",
         "application/pdf",
@@ -221,4 +250,22 @@ def test_every_forwarded_part_is_accepted_by_the_installed_adk():
         )
     )
     assert len(parts) == len(samples)
-    _get_content(utils.create_content("", parts).parts)  # must not raise
+    content = _get_content(utils.create_content("", parts).parts)  # ADK: must not raise
+    # litellm layer: must not raise either (this is what audio_url tripped).
+    validate_chat_completion_user_messages([{"role": "user", "content": content}])
+
+
+def test_audio_inlined_as_a_part_would_be_rejected_by_litellm():
+    """The reason audio is transcribed instead of inlined (EVO-2227).
+
+    ADK converts an audio Blob into an `audio_url` content part, which is NOT in
+    litellm's ValidUserMessageContentTypes -> a 500 that costs the whole turn.
+    This pins that fact: if a future litellm starts accepting `audio_url`, this
+    fails and we can revisit native audio forwarding.
+    """
+    from litellm.utils import validate_chat_completion_user_messages
+
+    audio_part = Part(inline_data=Blob(mime_type="audio/ogg", data=b"bytes"))
+    content = _get_content([audio_part])  # ADK does not raise here...
+    with pytest.raises(Exception):  # ...but litellm does.
+        validate_chat_completion_user_messages([{"role": "user", "content": content}])
