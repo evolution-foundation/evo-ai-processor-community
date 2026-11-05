@@ -2,6 +2,7 @@
 Dify provider service for external agent integration.
 """
 
+import json
 import logging
 from typing import Dict, Any, Optional
 import httpx
@@ -38,46 +39,67 @@ class DifyService:
         message: str,
         session_id: str,
         context: Optional[Dict[str, Any]] = None,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """
         Send a message to Dify and get the response.
 
         Args:
             message: User message
-            session_id: Session identifier for conversation continuity
-            context: Optional context variables (remoteJid, pushName, etc.)
+            session_id: Evo session identifier (used as the Dify ``user``)
+            context: Optional context variables (remoteJid, pushName, etc.).
+                ``providerConversationId`` carries the Dify conversation_id
+                returned by a previous call in the same Evo session.
 
         Returns:
-            Response text from Dify
+            ``{"text": answer, "conversation_id": dify_conversation_id}``
         """
         if not self.api_url or not self.api_key:
             raise ValueError("Dify apiUrl and apiKey are required")
 
-        # Determine endpoint based on bot type
-        if self.bot_type == "chatBot":
-            endpoint = f"{self.api_url}/chat-messages"
-        elif self.bot_type == "textGenerator":
-            endpoint = f"{self.api_url}/completion-messages"
-        else:  # agent
-            endpoint = f"{self.api_url}/chat-messages"
+        context = context or {}
+        conversation_id = context.get("providerConversationId") or None
 
-        # Build payload
+        try:
+            return await self._post(message, session_id, context, conversation_id)
+        except _DifyConversationNotFound:
+            # The stored conversation was deleted on the Dify side (or came from
+            # another app): start a fresh one instead of failing the turn.
+            logger.warning(
+                f"Dify conversation {conversation_id} not found, starting a new one"
+            )
+            return await self._post(message, session_id, context, None)
+
+    async def _post(
+        self,
+        message: str,
+        session_id: str,
+        context: Dict[str, Any],
+        conversation_id: Optional[str],
+    ) -> Dict[str, Any]:
+        # textGenerator → completion app; chatBot/agent → chat-style apps.
+        is_completion = self.bot_type == "textGenerator"
+        endpoint = f"{self.api_url}/{'completion-messages' if is_completion else 'chat-messages'}"
+
         payload: Dict[str, Any] = {
             "inputs": {
-                "remoteJid": context.get("remoteJid", "") if context else "",
-                "pushName": context.get("pushName", "") if context else "",
-                "instanceName": context.get("instanceName", "") if context else "",
-                "serverUrl": context.get("serverUrl", "") if context else "",
-                "apiKey": context.get("apiKey", "") if context else "",
+                "remoteJid": context.get("remoteJid", ""),
+                "pushName": context.get("pushName", ""),
+                "instanceName": context.get("instanceName", ""),
+                "serverUrl": context.get("serverUrl", ""),
+                "apiKey": context.get("apiKey", ""),
             },
             "query": message,
-            "response_mode": "streaming" if self.bot_type == "agent" else "blocking",
-            "conversation_id": session_id if session_id and session_id != "new" else None,
-            "user": context.get("remoteJid", session_id) if context else session_id,
+            # Chat-style apps always stream: Agent Chat apps reject blocking
+            # mode with 400, and streaming works for every chat app type.
+            "response_mode": "blocking" if is_completion else "streaming",
+            "user": context.get("remoteJid") or session_id,
         }
+        # conversation_id must be one Dify issued — never the Evo session id,
+        # which Dify rejects with 404 "Conversation Not Exists".
+        if conversation_id and not is_completion:
+            payload["conversation_id"] = conversation_id
 
-        # For textGenerator, move query to inputs
-        if self.bot_type == "textGenerator":
+        if is_completion:
             payload["inputs"]["query"] = message
             del payload["query"]
 
@@ -88,54 +110,61 @@ class DifyService:
 
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    endpoint,
-                    json=payload,
-                    headers=headers,
-                )
+                response = await client.post(endpoint, json=payload, headers=headers)
                 response.raise_for_status()
-                
-                # Handle streaming response for agent type
-                if self.bot_type == "agent":
-                    return self._process_streaming_response(response.text)
-                else:
-                    response_data = response.json()
-                    return response_data.get("answer", "")
+
+                if is_completion:
+                    return {"text": response.json().get("answer", ""), "conversation_id": None}
+                return self._process_streaming_response(response.text)
         except httpx.HTTPStatusError as e:
-            logger.error(f"Dify API error: {e.response.status_code} - {e.response.text}")
-            raise Exception(f"Dify API error: {e.response.status_code}")
+            body = e.response.text
+            if e.response.status_code == 404 and conversation_id and "Conversation Not Exists" in body:
+                raise _DifyConversationNotFound() from e
+            logger.error(f"Dify API error: {e.response.status_code} - {body}")
+            raise Exception(f"Dify API error: {e.response.status_code} - {_error_message(body)}")
         except Exception as e:
             logger.error(f"Error calling Dify: {e}")
             raise
 
-    def _process_streaming_response(self, response_text: str) -> str:
+    def _process_streaming_response(self, response_text: str) -> Dict[str, Any]:
         """
-        Process streaming SSE response from Dify agent.
+        Process a streaming SSE response from a Dify chat app.
 
-        Args:
-            response_text: Raw SSE response text
-
-        Returns:
-            Concatenated answer text
+        Chatbot/Chatflow apps stream ``message`` events and Agent apps stream
+        ``agent_message`` events; both carry an ``answer`` chunk and the
+        ``conversation_id``. An ``error`` event aborts the turn.
         """
         answer = ""
         conversation_id = None
-        
-        # Remove 'data: ' prefix and split by newlines
-        data = response_text.replace("data: ", "")
-        events = [line.strip() for line in data.split("\n") if line.strip()]
-        
-        for event_string in events:
-            if event_string.startswith("{"):
-                try:
-                    import json
-                    event = json.loads(event_string)
-                    
-                    if event.get("event") == "agent_message":
-                        conversation_id = conversation_id or event.get("conversation_id")
-                        answer += event.get("answer", "")
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse SSE event: {event_string}")
-                    continue
-        
-        return answer
+
+        for line in response_text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            try:
+                event = json.loads(line[len("data:"):].strip())
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse SSE event: {line}")
+                continue
+
+            kind = event.get("event")
+            if kind in ("message", "agent_message"):
+                answer += event.get("answer", "")
+                conversation_id = conversation_id or event.get("conversation_id")
+            elif kind == "message_end":
+                conversation_id = conversation_id or event.get("conversation_id")
+            elif kind == "error":
+                raise Exception(f"Dify API error: {event.get('status', '')} - {event.get('message', '')}")
+
+        return {"text": answer, "conversation_id": conversation_id}
+
+
+class _DifyConversationNotFound(Exception):
+    """The conversation_id sent to Dify no longer exists."""
+
+
+def _error_message(body: str) -> str:
+    try:
+        return json.loads(body).get("message", body)
+    except (ValueError, AttributeError):
+        return body

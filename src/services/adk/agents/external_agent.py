@@ -4,7 +4,7 @@ External agent for integrating with external providers (Flowise, N8N, Typebot, D
 
 from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
-from google.adk.events import Event
+from google.adk.events import Event, EventActions
 from google.genai.types import Content, Part
 from sqlalchemy.orm import Session
 from typing import AsyncGenerator, Dict, Any
@@ -139,9 +139,15 @@ class ExternalAgent(BaseAgent):
 
                 response_text = provider_response
                 structured = None
+                state_delta: Dict[str, Any] = {}
                 if isinstance(provider_response, dict):
                     response_text = provider_response.get("text", "")
                     structured = provider_response.get("structured")
+                    # Providers with their own conversation ids (Dify) hand the
+                    # id back so the next turn of this session continues it.
+                    provider_conversation_id = provider_response.get("conversation_id")
+                    if provider_conversation_id:
+                        state_delta[self._conversation_state_key()] = provider_conversation_id
 
                 parts = [Part(text=str(response_text) if response_text is not None else "")]
                 if structured is not None:
@@ -154,6 +160,7 @@ class ExternalAgent(BaseAgent):
                         role="agent",
                         parts=parts,
                     ),
+                    actions=EventActions(state_delta=state_delta) if state_delta else EventActions(),
                 )
 
                 # Execute sub-agents if any
@@ -194,6 +201,10 @@ class ExternalAgent(BaseAgent):
         import uuid
         return str(uuid.uuid4())
 
+    def _conversation_state_key(self) -> str:
+        """Session-state key holding the provider-issued conversation id."""
+        return f"{self.provider}_conversation_id"
+
     def _build_provider_context(self, ctx: InvocationContext, session_id: str) -> Dict[str, Any]:
         """Build context dictionary for provider."""
         context: Dict[str, Any] = {
@@ -209,6 +220,7 @@ class ExternalAgent(BaseAgent):
                 "serverUrl": ctx.session.state.get("serverUrl", ""),
                 "apiKey": ctx.session.state.get("apiKey", ""),
                 "ownerJid": ctx.session.state.get("ownerJid", ""),
+                "providerConversationId": ctx.session.state.get(self._conversation_state_key(), ""),
             })
 
         return context
