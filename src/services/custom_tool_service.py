@@ -98,6 +98,9 @@ def convert_to_http_tool(custom_tool: CustomTool) -> Dict[str, Any]:
         "method": custom_tool.method,
         "endpoint": custom_tool.endpoint,
         "headers": custom_tool.headers,
+        # Without it the builders cannot tell a linked auth header from an
+        # unlinked one, and the vault is never asked.
+        "credential_refs": getattr(custom_tool, "credential_refs", None) or {},
         "parameters": {
             "path_params": custom_tool.path_params,
             "query_params": custom_tool.query_params,

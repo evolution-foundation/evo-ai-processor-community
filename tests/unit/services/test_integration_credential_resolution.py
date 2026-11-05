@@ -110,7 +110,11 @@ def test_without_a_reference_the_inline_value_is_untouched():
     config = {"apiUrl": "https://dify.example.com", "apiKey": "app-dify-inline"}
 
     resolved = apply_vault_credential(
-        "dify", config, vault=vault, decrypt=lambda _: pytest.fail("must not decrypt")
+        "dify",
+        config,
+        vault=vault,
+        decrypt=lambda _: pytest.fail("must not decrypt"),
+        migrated=lambda: False,
     )
 
     assert resolved["apiKey"] == "app-dify-inline"

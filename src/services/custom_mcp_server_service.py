@@ -59,6 +59,7 @@ def convert_to_mcp_server_config(custom_server: CustomMCPServer) -> Dict[str, An
     return {
         "url": custom_server.url,
         "headers": custom_server.headers,
+        "credential_refs": getattr(custom_server, "credential_refs", None) or {},
     }
 
 

@@ -36,6 +36,7 @@ import requests
 import json
 import urllib.parse
 from src.utils.logger import setup_logger
+from src.services.adk.integration_credentials import migration_reader
 from src.utils.tool_naming import sanitize_tool_name, unique_tool_name
 
 logger = setup_logger(__name__)
@@ -145,22 +146,28 @@ def exit_loop(tool_context: ToolContext):
 
 
 
-def _apply_vault_refs(tool_config, headers, _db=None):
+def _apply_vault_refs(tool_config, headers, _db=None, migrated=None):
     """Resolves headers that point at the credential vault.
 
     Opens its own short-lived session because neither tool builder carries one.
     Any failure falls back to the inline headers, so a vault outage degrades to
-    today's behaviour instead of breaking the tool.
+    today's behaviour instead of breaking the tool. An auth header with no
+    reference is not sent once the installation migrated.
     """
+    from src.services.adk.integration_credentials import (
+        DatabaseCredentialVault,
+        resolve_credential_refs,
+        retire_unreferenced_auth_headers,
+    )
+
     credential_refs = tool_config.get("credential_refs") or {}
+    headers = retire_unreferenced_auth_headers(
+        headers, credential_refs, migrated=migrated or migration_reader()
+    )
     if not credential_refs:
         return headers
 
     from src.config.database import SessionLocal
-    from src.services.adk.integration_credentials import (
-        DatabaseCredentialVault,
-        resolve_credential_refs,
-    )
     from src.utils.crypto import decrypt_api_key
 
     session = SessionLocal()
@@ -175,8 +182,11 @@ def _apply_vault_refs(tool_config, headers, _db=None):
         session.close()
 
 class CustomToolBuilder:
-    def __init__(self):
+    def __init__(self, migrated: Optional[Callable[[], bool]] = None):
         self.tools = []
+        # A builder handed a reader shares its caller's single read.
+        self._given_migrated = migrated
+        self._migrated = migrated or migration_reader()
 
     def _create_http_tool(
         self, tool_config: Dict[str, Any], taken_names: Container[str] = ()
@@ -193,7 +203,7 @@ class CustomToolBuilder:
         headers = tool_config.get("headers", {})
         # A header pointing at the vault takes its value from there; the inline
         # one stays the fallback.
-        headers = _apply_vault_refs(tool_config, headers)
+        headers = _apply_vault_refs(tool_config, headers, migrated=self._migrated)
         parameters = tool_config.get("parameters", {}) or {}
         values = strip_modes_meta(tool_config.get("values"))
         error_handling = tool_config.get("error_handling", {})
@@ -357,6 +367,7 @@ class CustomToolBuilder:
             db: Database session (required when using custom_tool_ids)
         """
         self.tools = []
+        self._migrated = self._given_migrated or migration_reader()
         taken_names = set()
 
         # Process custom_tool_ids - fetch from database
@@ -392,6 +403,7 @@ class CustomToolBuilder:
                         "method": custom_tool.method,
                         "endpoint": custom_tool.endpoint,
                         "headers": custom_tool.headers or {},
+                        "credential_refs": getattr(custom_tool, "credential_refs", None) or {},
                         "parameters": {
                             "path_params": custom_tool.path_params or {},
                             "query_params": custom_tool.query_params or {},

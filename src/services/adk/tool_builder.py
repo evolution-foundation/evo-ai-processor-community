@@ -34,6 +34,7 @@ import json
 import urllib.parse
 from src.utils.logger import setup_logger
 from src.utils.tool_naming import sanitize_tool_name, unique_tool_name
+from src.services.adk.integration_credentials import migration_reader
 from src.services.adk.custom_tools import (
     CustomToolBuilder,
     declare_body_params,
@@ -54,22 +55,28 @@ def _nexus_credential_ref(config):
     credential_id = config.get("credential_id")
     return {"nexus_api_key": credential_id} if credential_id else {}
 
-def _apply_vault_refs(tool_config, headers, _db=None):
+def _apply_vault_refs(tool_config, headers, _db=None, migrated=None):
     """Resolves headers that point at the credential vault.
 
     Opens its own short-lived session because neither tool builder carries one.
     Any failure falls back to the inline headers, so a vault outage degrades to
-    today's behaviour instead of breaking the tool.
+    today's behaviour instead of breaking the tool. An auth header with no
+    reference is not sent once the installation migrated.
     """
+    from src.services.adk.integration_credentials import (
+        DatabaseCredentialVault,
+        resolve_credential_refs,
+        retire_unreferenced_auth_headers,
+    )
+
     credential_refs = tool_config.get("credential_refs") or {}
+    headers = retire_unreferenced_auth_headers(
+        headers, credential_refs, migrated=migrated or migration_reader()
+    )
     if not credential_refs:
         return headers
 
     from src.config.database import SessionLocal
-    from src.services.adk.integration_credentials import (
-        DatabaseCredentialVault,
-        resolve_credential_refs,
-    )
     from src.utils.crypto import decrypt_api_key
 
     session = SessionLocal()
@@ -86,6 +93,7 @@ def _apply_vault_refs(tool_config, headers, _db=None):
 class ToolBuilder:
     def __init__(self):
         self.tools = []
+        self._migrated = migration_reader()
 
     def _create_http_tool(
         self, tool_config: Dict[str, Any], taken_names: Container[str] = ()
@@ -102,7 +110,7 @@ class ToolBuilder:
         headers = tool_config.get("headers", {})
         # Second header-injection path: hardening only one of the two would
         # leave the other echoing inline secrets.
-        headers = _apply_vault_refs(tool_config, headers)
+        headers = _apply_vault_refs(tool_config, headers, migrated=self._migrated)
         parameters = tool_config.get("parameters", {}) or {}
         values = strip_modes_meta(tool_config.get("values"))
         error_handling = tool_config.get("error_handling", {})
@@ -297,6 +305,7 @@ class ToolBuilder:
         Accepts both 'tools' and 'custom_tools' (with http_tools), plus 'custom_tool_ids'.
         """
         self.tools = []
+        self._migrated = migration_reader()
 
         # First, process custom_tool_ids using CustomToolBuilder. It is handed the
         # IDs only: the http_tools below are the same tools expanded from those very
@@ -304,7 +313,7 @@ class ToolBuilder:
         # letting CustomToolBuilder see them too would build each tool twice.
         built_from_ids = set()
         if agent_config.get("custom_tool_ids") and db:
-            custom_tool_builder = CustomToolBuilder()
+            custom_tool_builder = CustomToolBuilder(migrated=self._migrated)
             custom_tools_from_ids = custom_tool_builder.build_tools(
                 {"custom_tool_ids": agent_config["custom_tool_ids"]}, db
             )
@@ -493,9 +502,18 @@ class ToolBuilder:
                 # Only the key goes to the vault: nexus_base_url and space_id
                 # are the address, and keeping them out is what lets one
                 # credential serve agents pointing at different spaces.
+                nexus_refs = _nexus_credential_ref(knowledge_nexus_config)
+                if api_key and not nexus_refs and self._migrated():
+                    logger.warning(
+                        "knowledge-nexus: no credential linked, and the inline key "
+                        "is no longer used since the installation migrated to the "
+                        "credential vault"
+                    )
+                    api_key = None
                 api_key = _apply_vault_refs(
-                    {"credential_refs": _nexus_credential_ref(knowledge_nexus_config)},
+                    {"credential_refs": nexus_refs},
                     {"nexus_api_key": api_key},
+                    migrated=self._migrated,
                 ).get("nexus_api_key")
                 space_id = (
                     knowledge_nexus_config.get("space_id")
