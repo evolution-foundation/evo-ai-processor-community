@@ -9,20 +9,23 @@ inline value is still the fallback.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.services import custom_tool_service
-from src.services.adk import integration_credentials, mcp_service, tool_builder
+from src.services import custom_mcp_server_service, custom_tool_service
+from src.services.adk import mcp_service
 from src.services.adk.agents import external_agent_builder
 from src.services.adk.custom_tools import CustomToolBuilder
 from src.services.adk.integration_credentials import (
     apply_vault_credential,
     installation_integration_migrated,
     integration_migrated,
+    migration_reader,
     retire_unreferenced_auth_headers,
 )
 from src.services.adk.tool_builder import ToolBuilder
@@ -59,12 +62,21 @@ class TestIntegrationMigrated:
         integration_migrated(db)
 
         sql, params = db.execute.call_args.args
-        assert "installation_configs" in str(sql)
+        # InstallationConfig#value= stores {"value": <value>} in serialized_value.
+        assert "FROM installation_configs" in str(sql)
+        assert "serialized_value -> 'value'" in str(sql)
         assert params == {"name": "INTEGRATION_CREDENTIALS_MIGRATED"}
 
     def test_a_session_that_cannot_open_is_not_migrated(self):
         with patch("src.config.database.SessionLocal", side_effect=RuntimeError("down")):
             assert installation_integration_migrated() is False
+
+    def test_a_reader_asks_the_database_once(self):
+        with patch(MIGRATED, return_value=True) as read:
+            migrated = migration_reader()
+            assert [migrated(), migrated(), migrated()] == [True, True, True]
+
+        assert read.call_count == 1
 
 
 class TestRetireUnreferencedAuthHeaders:
@@ -208,6 +220,23 @@ class TestToolAttachedById:
 
         assert _sent_headers(built) == {}
 
+    def test_an_agent_with_many_tools_reads_the_record_once(self):
+        tools = [_catalog_tool(name=f"consulta_{n}") for n in range(3)]
+        with patch(MIGRATED, return_value=True) as read, patch.object(
+            custom_tool_service, "get_custom_tool", side_effect=tools
+        ):
+            ToolBuilder().build_tools(
+                {
+                    "custom_tool_ids": [str(t.id) for t in tools],
+                    "http_tools": [
+                        {**_http_config({"Authorization": "Bearer antigo"}, {}), "name": "inline"}
+                    ],
+                },
+                db=MagicMock(),
+            )
+
+        assert read.call_count == 1
+
     def test_the_agent_config_expansion_carries_the_references(self):
         tool = _catalog_tool(credential_refs={"Authorization": "cred-1"})
 
@@ -241,6 +270,83 @@ class TestCustomMcpHeaders:
             headers = mcp_service._resolve_mcp_headers(self._server({}), MagicMock())
 
         assert headers["X-Api-Key"] == "antiga"
+
+
+class TestCustomMcpFromAgentConfig:
+    """get_agent expands custom_mcp_server_ids into custom_mcp_servers entries,
+    and build_lazy_tools connects to those too."""
+
+    def _expanded(self, credential_refs):
+        return custom_mcp_server_service.convert_to_mcp_server_config(
+            SimpleNamespace(
+                url="https://mcp.example.com/mcp",
+                headers={"Authorization": "Bearer antigo"},
+                credential_refs=credential_refs,
+            )
+        )
+
+    def _discovered_headers(self, config):
+        seen = []
+
+        @asynccontextmanager
+        async def capture(server, timeout=None):
+            seen.append(dict(server.get("headers") or {}))
+            yield []
+
+        cache = MagicMock()
+        cache.get_server_tools = AsyncMock(return_value=None)
+        cache.get_agent_tools = AsyncMock(return_value=None)
+        with patch.object(mcp_service, "mcp_context", capture), patch.object(
+            mcp_service, "mcp_tool_cache", cache
+        ):
+            asyncio.run(mcp_service.MCPService().build_lazy_tools(config, MagicMock(), None))
+        return seen
+
+    def test_the_expansion_carries_the_references(self):
+        assert self._expanded({"Authorization": "cred-1"})["credential_refs"] == {
+            "Authorization": "cred-1"
+        }
+
+    def test_unlinked_entry_sends_no_inline_auth_once_migrated(self):
+        with patch(MIGRATED, return_value=True):
+            seen = self._discovered_headers({"custom_mcp_servers": [self._expanded({})]})
+
+        assert [h.get("Authorization") for h in seen] == [None]
+
+    def test_unlinked_entry_keeps_the_inline_auth_when_never_migrated(self):
+        with patch(MIGRATED, return_value=False):
+            seen = self._discovered_headers({"custom_mcp_servers": [self._expanded({})]})
+
+        assert [h.get("Authorization") for h in seen] == ["Bearer antigo"]
+
+    def test_linked_entry_comes_from_the_vault(self):
+        def from_vault(headers, refs, vault, decrypt):
+            return {**headers, **{name: "do-cofre" for name in refs}}
+
+        with patch(MIGRATED, return_value=True), patch(RESOLVE, side_effect=from_vault):
+            seen = self._discovered_headers(
+                {"custom_mcp_servers": [self._expanded({"Authorization": "cred-1"})]}
+            )
+
+        assert [h.get("Authorization") for h in seen] == ["do-cofre"]
+
+    def test_ids_and_expanded_entries_share_one_read(self):
+        row = SimpleNamespace(
+            url="https://mcp.example.com/mcp",
+            headers={"Authorization": "Bearer antigo"},
+            credential_refs={},
+        )
+        config = {
+            "custom_mcp_server_ids": [str(uuid.uuid4())],
+            "custom_mcp_servers": [self._expanded({}), self._expanded({})],
+        }
+        with patch(MIGRATED, return_value=True) as read, patch.object(
+            custom_mcp_server_service, "get_custom_mcp_server", return_value=row
+        ):
+            seen = self._discovered_headers(config)
+
+        assert [h.get("Authorization") for h in seen] == [None, None, None]
+        assert read.call_count == 1
 
 
 class TestExternalAgentSecret:
@@ -299,7 +405,7 @@ class TestKnowledgeNexusKey:
         }
 
     def _nexus_tools(self, config, migrated):
-        with patch.object(tool_builder, "installation_integration_migrated", return_value=migrated), patch(
+        with patch(MIGRATED, return_value=migrated), patch(
             "src.services.adk.tools.knowledge_nexus.create_knowledge_nexus_search_tool"
         ) as create:
             ToolBuilder().build_tools(config)
