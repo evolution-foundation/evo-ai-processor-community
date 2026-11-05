@@ -127,18 +127,27 @@ def installation_integration_migrated() -> bool:
         session.close()
 
 
+def migration_reader() -> Callable[[], bool]:
+    """One build's view of the migration record: read on the first ask, then
+    reused, so an agent with many tools does not query once per tool."""
+    answer = []
+
+    def migrated() -> bool:
+        if not answer:
+            answer.append(installation_integration_migrated())
+        return answer[0]
+
+    return migrated
+
+
 def retire_unreferenced_auth_headers(
     headers: Dict[str, Any],
     credential_refs: Dict[str, str],
     migrated: Callable[[], bool],
 ) -> Dict[str, Any]:
     """Drops the auth headers no vault reference covers once the installation
-    migrated: there, an inline auth header is one the user unlinked, not one
-    still waiting for the migration.
-
-    `migrated` is only asked when such a header exists, so a tool that is fully
-    on the vault, or has no auth header, costs no extra read.
-    """
+    migrated, where such a header is one the user unlinked. `migrated` is only
+    asked when such a header exists."""
     headers = headers or {}
     refs = credential_refs or {}
     retired = [

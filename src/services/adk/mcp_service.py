@@ -144,7 +144,10 @@ class MCPService:
         Returns:
             List of lazy MCP tools
         """
+        from src.services.adk.integration_credentials import migration_reader
+
         lazy_tools = []
+        migrated = migration_reader()
 
         try:
             # Process MCP servers from configuration (code-based, not database)
@@ -748,7 +751,7 @@ class MCPService:
                         # stays the fallback.
                         server_config = {
                             "url": custom_server.url,
-                            "headers": _resolve_mcp_headers(custom_server, db),
+                            "headers": _resolve_mcp_headers(custom_server, db, migrated),
                         }
 
                         logger.info(
@@ -830,6 +833,12 @@ class MCPService:
                         continue
 
                     try:
+                        # get_agent expands custom_mcp_server_ids into these
+                        # entries, so they go through the vault the same way.
+                        server = {
+                            **server,
+                            "headers": _resolve_mcp_headers(server, db, migrated),
+                        }
                         server_id = server.get("id", server.get("url", "unknown"))
                         logger.info(
                             f"Discovering tools from custom MCP server: {server.get('url', 'unknown')}"
@@ -988,24 +997,29 @@ def _resolve_mcp_envs(server, db):
     )
 
 
-def _resolve_mcp_headers(custom_server, db):
+def _resolve_mcp_headers(custom_server, db, migrated=None):
     """Resolves the headers of a remote MCP server against the credential vault.
 
+    `custom_server` is the catalog row or its expansion in the agent config.
     A vault outage, or an unresolvable reference with an inline value present,
     degrades to today's behaviour, so nothing breaks before the 2.6 migration.
     An auth header with no reference is not sent once the installation migrated.
     """
     from src.services.adk.integration_credentials import (
         DatabaseCredentialVault,
-        installation_integration_migrated,
+        migration_reader,
         resolve_credential_refs,
         retire_unreferenced_auth_headers,
     )
 
-    headers = custom_server.headers or {}
-    credential_refs = getattr(custom_server, "credential_refs", None) or {}
+    if isinstance(custom_server, dict):
+        headers = custom_server.get("headers") or {}
+        credential_refs = custom_server.get("credential_refs") or {}
+    else:
+        headers = custom_server.headers or {}
+        credential_refs = getattr(custom_server, "credential_refs", None) or {}
     headers = retire_unreferenced_auth_headers(
-        headers, credential_refs, migrated=installation_integration_migrated
+        headers, credential_refs, migrated=migrated or migration_reader()
     )
     if not credential_refs:
         return headers
