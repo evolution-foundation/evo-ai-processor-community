@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from src.services.linear_service import LinearService
 from src.config.database import get_db
+from src.api.mcp_integration_base import IntegrationConfigUpdate, merge_editable_config
 from src.utils.response import success_response, error_response, map_status_to_error_code
 from src.schemas.responses import SuccessResponse, ErrorResponse
 from src.schemas.response_models import (
@@ -414,7 +415,7 @@ async def discover_tools(
 )
 async def save_configuration(
     agent_id: str,
-    config: Dict[str, Any],
+    config: IntegrationConfigUpdate,
     db: Session = Depends(get_db),
     service: LinearService = Depends(get_linear_service),
     _permission: None = Depends(RequirePermission("integrations", "update")),
@@ -435,9 +436,7 @@ async def save_configuration(
             status_code=status.HTTP_404_NOT_FOUND
         )
         
-        from src.api.mcp_integration_base import merge_editable_config
-
-        updated_config = merge_editable_config("linear", stored_config, config.get("config"))
+        updated_config = merge_editable_config("linear", stored_config, config.config)
         
         # Ensure connected is set correctly based on access_token
         updated_config["connected"] = bool(updated_config.get("access_token"))

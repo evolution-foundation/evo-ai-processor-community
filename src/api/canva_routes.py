@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from src.services.canva_service import CanvaService
 from src.utils.response import success_response, error_response, map_status_to_error_code
 from src.config.database import get_db
+from src.api.mcp_integration_base import IntegrationConfigUpdate, merge_editable_config
 from src.schemas.responses import SuccessResponse, ErrorResponse
 from src.schemas.response_models import (
     OAuthMetadataResponse, OAuthAuthorizationResponse, OAuthCallbackResponse, 
@@ -365,7 +366,7 @@ async def discover_tools(
 )
 async def save_configuration(
     agent_id: str,
-    config: Dict[str, Any],
+    config: IntegrationConfigUpdate,
     request: Request,
     db: Session = Depends(get_db),
     service: CanvaService = Depends(get_canva_service),
@@ -387,9 +388,7 @@ async def save_configuration(
             status_code=status.HTTP_404_NOT_FOUND
         )
         
-        from src.api.mcp_integration_base import merge_editable_config
-
-        updated_config = merge_editable_config("canva", stored_config, config.get("config"))
+        updated_config = merge_editable_config("canva", stored_config, config.config)
         
         # Ensure connected is set correctly based on access_token
         updated_config["connected"] = bool(updated_config.get("access_token"))
