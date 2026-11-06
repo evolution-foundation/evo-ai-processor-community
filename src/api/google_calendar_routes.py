@@ -327,7 +327,6 @@ async def get_calendars(
     except ValueError as e:
         logger.error(f"No credentials found: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_404_NOT_FOUND),
             message="Google Calendar not connected",
             status_code=status.HTTP_404_NOT_FOUND
@@ -335,9 +334,8 @@ async def get_calendars(
     except Exception as e:
         logger.error(f"Error fetching calendars: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to fetch calendars: {str(e)}",
+            message="Failed to fetch calendars",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -378,9 +376,8 @@ async def save_configuration(
     except Exception as e:
         logger.error(f"Error saving configuration: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to save configuration: {str(e)}",
+            message="Failed to save configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -418,9 +415,8 @@ async def disconnect(
     except Exception as e:
         logger.error(f"Error disconnecting Google Calendar: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to disconnect Google Calendar: {str(e)}",
+            message="Failed to disconnect Google Calendar",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -467,7 +463,6 @@ async def check_availability(
     except ValueError as e:
         logger.error(f"No credentials found: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_404_NOT_FOUND),
             message="Google Calendar not connected",
             status_code=status.HTTP_404_NOT_FOUND
@@ -475,9 +470,8 @@ async def check_availability(
     except Exception as e:
         logger.error(f"Error checking availability: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to check availability: {str(e)}",
+            message="Failed to check availability",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -528,7 +522,6 @@ async def create_event(
     except ValueError as e:
         logger.error(f"No credentials found: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_404_NOT_FOUND),
             message="Google Calendar not connected",
             status_code=status.HTTP_404_NOT_FOUND
@@ -536,8 +529,7 @@ async def create_event(
     except Exception as e:
         logger.error(f"Error creating event: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to create event: {str(e)}",
+            message="Failed to create event",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )

@@ -136,9 +136,8 @@ async def get_configuration_endpoint(
     except Exception as e:
         logger.error(f"Error getting {provider} configuration: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to get configuration: {str(e)}",
+            message="Failed to get configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 

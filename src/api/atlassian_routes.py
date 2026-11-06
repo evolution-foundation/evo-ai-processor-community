@@ -148,9 +148,8 @@ async def discover_oauth_requirements(
     except Exception as e:
         logger.error(f"Error discovering OAuth requirements: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to discover OAuth requirements: {str(e)}",
+            message="Failed to discover OAuth requirements",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -313,7 +312,7 @@ async def get_configuration(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to get configuration: {str(e)}",
+            message="Failed to get configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -415,7 +414,7 @@ async def update_configuration(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to update configuration: {str(e)}",
+            message="Failed to update configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -444,8 +443,7 @@ async def disconnect(
     except Exception as e:
         logger.error(f"Error disconnecting Atlassian: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to disconnect: {str(e)}",
+            message="Failed to disconnect",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )

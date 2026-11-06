@@ -136,9 +136,8 @@ async def discover_oauth(
     except Exception as e:
         logger.error(f"Error discovering OAuth requirements: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to discover OAuth requirements: {str(e)}",
+            message="Failed to discover OAuth requirements",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -267,13 +266,8 @@ async def get_configuration(
             return await service._load_credentials(ag_id)
         return None
 
-    configuration = await get_configuration_endpoint(
+    return await get_configuration_endpoint(
         agent_id, "github", db, load_from_service
-    )
-
-    return success_response(
-        data=configuration,
-        message="Configuration retrieved successfully"
     )
 
 @router.get(
@@ -332,7 +326,6 @@ async def save_configuration(
         
         if not stored_config:
             return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_404_NOT_FOUND),
             message="GitHub integration not connected. Please connect first via OAuth.",
             status_code=status.HTTP_404_NOT_FOUND
@@ -352,7 +345,6 @@ async def save_configuration(
         
         if not success:
             return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
             message="Failed to save configuration to database",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -372,9 +364,8 @@ async def save_configuration(
     except Exception as e:
         logger.error(f"Error saving GitHub configuration: {e}", exc_info=True)
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to save configuration: {str(e)}",
+            message="Failed to save configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -405,8 +396,7 @@ async def disconnect(
     except Exception as e:
         logger.error(f"Error disconnecting GitHub: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to disconnect: {str(e)}",
+            message="Failed to disconnect",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )

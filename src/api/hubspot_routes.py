@@ -149,9 +149,8 @@ async def discover_oauth(
     except Exception as e:
         logger.error(f"Error discovering OAuth requirements: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to discover OAuth requirements: {str(e)}",
+            message="Failed to discover OAuth requirements",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -341,9 +340,8 @@ async def get_configuration(
     except Exception as e:
         logger.error(f"Error getting HubSpot configuration: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to get configuration: {str(e)}",
+            message="Failed to get configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -405,7 +403,6 @@ async def update_configuration(
         
         if not stored_config:
             return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_404_NOT_FOUND),
             message="HubSpot integration not found. Please complete OAuth flow first.",
             status_code=status.HTTP_404_NOT_FOUND
@@ -425,7 +422,6 @@ async def update_configuration(
 
         if not success:
             return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
             message="Failed to save configuration to database",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -445,9 +441,8 @@ async def update_configuration(
     except Exception as e:
         logger.error(f"Error updating HubSpot configuration: {e}", exc_info=True)
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to update configuration: {str(e)}",
+            message="Failed to update configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -476,8 +471,7 @@ async def disconnect(
     except Exception as e:
         logger.error(f"Error disconnecting HubSpot: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to disconnect: {str(e)}",
+            message="Failed to disconnect",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
