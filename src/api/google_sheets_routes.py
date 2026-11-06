@@ -295,7 +295,6 @@ async def get_spreadsheets(
     except ValueError as e:
         logger.error(f"No credentials found: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_404_NOT_FOUND),
             message="Google Sheets not connected",
             status_code=status.HTTP_404_NOT_FOUND
@@ -303,9 +302,8 @@ async def get_spreadsheets(
     except Exception as e:
         logger.error(f"Error fetching spreadsheets: {e}")
         return error_response(
-            request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to fetch spreadsheets: {str(e)}",
+            message="Failed to fetch spreadsheets",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -349,7 +347,7 @@ async def save_configuration(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to save configuration: {str(e)}",
+            message="Failed to save configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -390,6 +388,6 @@ async def disconnect(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to disconnect Google Sheets: {str(e)}",
+            message="Failed to disconnect Google Sheets",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
