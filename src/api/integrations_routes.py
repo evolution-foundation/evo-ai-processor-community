@@ -249,7 +249,7 @@ async def get_all_configurations(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to get configurations: {str(e)}",
+            message="Failed to get configurations",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 

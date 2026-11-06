@@ -139,7 +139,7 @@ async def discover_oauth(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to discover OAuth requirements: {str(e)}",
+            message="Failed to discover OAuth requirements",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -322,7 +322,7 @@ async def get_configuration(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to get configuration: {str(e)}",
+            message="Failed to get configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -432,7 +432,7 @@ async def save_configuration(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to save configuration: {str(e)}",
+            message="Failed to save configuration",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -464,6 +464,6 @@ async def disconnect(
         return error_response(
             request=request,
             code=map_status_to_error_code(status.HTTP_500_INTERNAL_SERVER_ERROR),
-            message=f"Failed to disconnect: {str(e)}",
+            message="Failed to disconnect",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
