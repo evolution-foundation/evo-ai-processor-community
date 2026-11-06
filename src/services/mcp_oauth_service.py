@@ -645,7 +645,6 @@ class MCPOAuthService:
                         self._token_endpoint_auth_method = client_info.get("token_endpoint_auth_method", "none")
 
                         # Store client credentials immediately so callback can find them
-                        # Note: db is not available in generate_authorization_url, so this will use HTTP
                         logger.info(
                             f"[{self.provider_name}] Storing dynamically registered client credentials. "
                             f"client_id={self.client_id}, "
@@ -656,7 +655,7 @@ class MCPOAuthService:
                                 agent_id,
                                 self.mcp_url,
                                 token_endpoint_auth_method=self._token_endpoint_auth_method,
-                                db=None  # Not available in generate_authorization_url
+                                db=None
                             )
                             logger.info(
                                 f"[{self.provider_name}] Dynamic registration successful and stored: "
@@ -841,7 +840,7 @@ class MCPOAuthService:
                 agent_id,
                 self.mcp_url,
                 token_endpoint_auth_method=self._token_endpoint_auth_method,
-                db=None  # Not available in generate_authorization_url
+                db=None
             )
             logger.info(
                 f"[{self.provider_name}] Stored client credentials for callback. "
@@ -1299,7 +1298,7 @@ class MCPOAuthService:
                     logger.debug("Removed code_verifier from memory")
 
                 # Also remove from persistent storage
-                await self._delete_pkce_verifier(agent_id, state)
+                await self._delete_pkce_verifier(agent_id, state, db=db)
 
             # Get user information (provider-specific)
             # This is optional and provider-specific
@@ -1314,7 +1313,7 @@ class MCPOAuthService:
             # For now, we'll skip user info retrieval and let providers implement it
             # if needed via their specific service classes
 
-            # Store credentials via evo-ai-core API (only if access_token was obtained)
+            # Store credentials (only if access_token was obtained)
             if access_token:
                 try:
                     logger.info(
@@ -1407,44 +1406,18 @@ class MCPOAuthService:
         db: Optional[Any] = None
     ) -> None:
         """Store PKCE code_verifier for retrieval during callback."""
-        try:
-            # Load existing config
-            existing_config = await self._load_credentials(agent_id, self.mcp_url, db=db) or {}
+        from src.services.agent_service import read_integration_config, write_integration_config
 
-            # Add/update pkce_verifiers dict
+        try:
+            existing_config = read_integration_config(db, agent_id, self.provider_name)
             pkce_verifiers = existing_config.get("pkce_verifiers", {})
             pkce_verifiers[state] = code_verifier
             existing_config["pkce_verifiers"] = pkce_verifiers
-
-            # Prefer direct database access if db session is available
-            if db is not None:
-                try:
-                    from src.services.agent_service import upsert_agent_integration
-                    success = await upsert_agent_integration(db, agent_id, self.provider_name, existing_config)
-                    if success:
-                        logger.info(
-                            f"Stored PKCE verifier for {self.provider_name} directly to database "
-                            f"(state: {state[:20]}..., total_verifiers={len(pkce_verifiers)})"
-                        )
-                        return
-                    else:
-                        logger.warning(f"Failed to store PKCE verifier to database, falling back to HTTP")
-                except Exception as db_error:
-                    logger.warning(f"Error storing PKCE verifier to database: {db_error}, falling back to HTTP")
-            
-            # Fallback to HTTP API if db is not available or database operation failed
-            url = f"{self.core_service_url}/agents/{agent_id}/integrations"
+            await write_integration_config(db, agent_id, self.provider_name, existing_config)
             logger.info(
-                f"Storing PKCE verifier for {self.provider_name} via HTTP. "
-                f"state_length={len(state)}, code_verifier_length={len(code_verifier)}, "
-                f"total_verifiers={len(pkce_verifiers)}"
+                f"Stored PKCE verifier for {self.provider_name} "
+                f"(state: {state[:20]}..., total_verifiers={len(pkce_verifiers)})"
             )
-            response = await self.http_client.post(
-                url,
-                json={"provider": self.provider_name, "config": existing_config}
-            )
-            response.raise_for_status()
-            logger.info(f"Successfully stored PKCE verifier for {self.provider_name} via HTTP (state: {state[:20]}...)")
         except Exception as e:
             logger.error(
                 f"Failed to store PKCE verifier for {self.provider_name}: {e}",
@@ -1491,25 +1464,20 @@ class MCPOAuthService:
     async def _delete_pkce_verifier(
         self,
         agent_id: str,
-        state: str
+        state: str,
+        db: Optional[Any] = None
     ) -> None:
         """Delete PKCE code_verifier from storage after use."""
-        try:
-            config = await self._load_credentials(agent_id, self.mcp_url)
-            if config and "pkce_verifiers" in config:
-                pkce_verifiers = config["pkce_verifiers"]
-                if state in pkce_verifiers:
-                    del pkce_verifiers[state]
-                    config["pkce_verifiers"] = pkce_verifiers
+        from src.services.agent_service import read_integration_config, write_integration_config
 
-                    # Update storage
-                    url = f"{self.core_service_url}/agents/{agent_id}/integrations"
-                    response = await self.http_client.post(
-                        url,
-                        json={"provider": self.provider_name, "config": config}
-                    )
-                    response.raise_for_status()
-                    logger.debug(f"Deleted PKCE verifier for state {state[:10]}...")
+        try:
+            config = read_integration_config(db, agent_id, self.provider_name)
+            pkce_verifiers = config.get("pkce_verifiers") or {}
+            if state in pkce_verifiers:
+                del pkce_verifiers[state]
+                config["pkce_verifiers"] = pkce_verifiers
+                await write_integration_config(db, agent_id, self.provider_name, config)
+                logger.debug(f"Deleted PKCE verifier for state {state[:10]}...")
         except Exception as e:
             logger.warning(f"Could not delete PKCE verifier: {e}")
 
@@ -1521,11 +1489,13 @@ class MCPOAuthService:
         db: Optional[Any] = None
     ) -> None:
         """Store only client credentials (client_id/secret) without access token."""
+        from src.services.agent_service import read_integration_config, write_integration_config
+
         # Load existing config first to preserve pkce_verifiers and other fields
-        existing_config = await self._load_credentials(agent_id, mcp_url, db=db) or {}
+        existing_config = read_integration_config(db, agent_id, self.provider_name)
         
         # IMPORTANT: Also check memory for pkce_verifiers that may not have been saved yet
-        # This handles the case where _store_pkce_verifier was called but hasn't completed HTTP save
+        # This handles the case where _store_pkce_verifier was called but hasn't completed its save
         memory_pkce_verifiers = {}
         if hasattr(self, '_pkce_verifiers') and self._pkce_verifiers:
             memory_pkce_verifiers = self._pkce_verifiers.copy()
@@ -1576,48 +1546,10 @@ class MCPOAuthService:
                 f"[{self.provider_name}] pkce_verifiers was lost during config merge, restoring from existing_config"
             )
 
-        # Prefer direct database access if db session is available
-        if db is not None:
-            try:
-                from src.services.agent_service import upsert_agent_integration
-                success = await upsert_agent_integration(db, agent_id, self.provider_name, config)
-                if success:
-                    logger.info(
-                        f"Successfully stored client credentials for {self.provider_name} "
-                        f"directly to database (agent: {agent_id})"
-                    )
-                    return
-                else:
-                    logger.warning(f"Failed to store client credentials to database, falling back to HTTP")
-            except Exception as db_error:
-                logger.warning(f"Error storing client credentials to database: {db_error}, falling back to HTTP")
-        
-        # Fallback to HTTP API if db is not available or database operation failed
-        url = f"{self.core_service_url}/agents/{agent_id}/integrations"
-        try:
-            response = await self.http_client.post(
-                url,
-                json={"provider": self.provider_name, "config": config}
-            )
-            response.raise_for_status()
-            logger.info(
-                f"Successfully stored client credentials for {self.provider_name} "
-                f"via HTTP API (agent: {agent_id})"
-            )
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                f"Failed to store client credentials for {self.provider_name} integration: "
-                f"status={e.response.status_code}, "
-                f"response={e.response.text[:500]}, "
-                f"url={url}"
-            )
-            raise
-        except Exception as e:
-            logger.error(
-                f"Unexpected error storing client credentials for {self.provider_name} integration: {e}",
-                exc_info=True
-            )
-            raise
+        await write_integration_config(db, agent_id, self.provider_name, config)
+        logger.info(
+            f"Stored client credentials for {self.provider_name} (agent: {agent_id})"
+        )
 
     async def _store_credentials(
         self,
@@ -1632,8 +1564,8 @@ class MCPOAuthService:
         expires_in: Optional[int] = None,
         db: Optional[Any] = None
     ) -> None:
-        """Store OAuth credentials directly to database or via evo-ai-core API."""
-        url = f"{self.core_service_url}/agents/{agent_id}/integrations"
+        """Store OAuth credentials in the database."""
+        from src.services.agent_service import write_integration_config
 
         config = {
             "provider": self.provider_name,
@@ -1671,67 +1603,10 @@ class MCPOAuthService:
             f"agent_id={agent_id}"
         )
         
-        # Prefer direct database access if db session is available
-        if db is not None:
-            try:
-                from src.services.agent_service import upsert_agent_integration
-                success = await upsert_agent_integration(db, agent_id, self.provider_name, config)
-                if success:
-                    logger.info(
-                        f"Successfully stored credentials for {self.provider_name} integration "
-                        f"directly to database (agent: {agent_id})"
-                    )
-                    return
-                else:
-                    logger.warning(f"Failed to store credentials to database, falling back to HTTP")
-            except Exception as db_error:
-                logger.warning(f"Error storing credentials to database: {db_error}, falling back to HTTP")
-        
-        # Fallback to HTTP API if db is not available or database operation failed
-        try:
-            # Use http_client if user_token is set, otherwise create a new client without auth
-            # This is needed for callbacks where user_token is empty
-            # NOTE: This may fail if core-service requires authentication
-            # TODO: Consider using a service token or modifying core-service to allow unauthenticated callbacks
-            if self.user_token:
-                logger.debug(f"Using authenticated client for {self.provider_name} credential storage")
-                response = await self.http_client.post(
-                    url,
-                    json={"provider": self.provider_name, "config": config}
-                )
-            else:
-                # Callback scenario: create a client without auth header
-                # WARNING: This will fail if core-service requires authentication
-                logger.warning(
-                    f"Attempting to store {self.provider_name} credentials without authentication. "
-                    f"This may fail if core-service requires auth. URL: {url}"
-                )
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        url,
-                        json={"provider": self.provider_name, "config": config}
-                    )
-            
-            response.raise_for_status()
-            logger.info(
-                f"Successfully stored credentials for {self.provider_name} integration "
-                f"via HTTP API (agent: {agent_id})"
-            )
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                f"Failed to store credentials for {self.provider_name} integration: "
-                f"status={e.response.status_code}, "
-                f"response={e.response.text[:500]}, "
-                f"url={url}, "
-                f"has_user_token={bool(self.user_token)}"
-            )
-            raise
-        except Exception as e:
-            logger.error(
-                f"Unexpected error storing credentials for {self.provider_name} integration: {e}",
-                exc_info=True
-            )
-            raise
+        await write_integration_config(db, agent_id, self.provider_name, config)
+        logger.info(
+            f"Stored credentials for {self.provider_name} integration (agent: {agent_id})"
+        )
 
     async def _load_credentials(
         self,

@@ -8,6 +8,7 @@ Each integration route should only contain provider-specific logic.
 import logging
 from typing import Dict, Any, Optional, Callable
 from fastapi import APIRouter, HTTPException, Depends, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.api.dependencies import get_current_user
@@ -21,6 +22,42 @@ from src.schemas.response_models import IntegrationConfigResponse, DiscoverTools
 from src.services.mcp_provider_endpoints import trusted_mcp_url
 
 logger = logging.getLogger(__name__)
+
+
+class IntegrationConfigUpdate(BaseModel):
+    """Body of the configuration PUT; a `config` that is not an object is a 422."""
+
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+# Fields the configuration PUT may write, per provider. Everything else in the
+# stored config (tokens, client credentials, PKCE verifiers, oauth_metadata,
+# mcp_url) is written only by the OAuth callback.
+EDITABLE_CONFIG_FIELDS: Dict[str, tuple] = {
+    provider: ("tools",)
+    for provider in (
+        "asana",
+        "atlassian",
+        "canva",
+        "github",
+        "hubspot",
+        "linear",
+        "monday",
+        "notion",
+        "paypal",
+        "supabase",
+    )
+}
+
+
+def merge_editable_config(
+    provider: str,
+    stored_config: Dict[str, Any],
+    incoming: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Stored config with only the provider's editable fields taken from the request body."""
+    editable = {k: incoming[k] for k in EDITABLE_CONFIG_FIELDS[provider] if k in incoming}
+    return {**stored_config, **editable}
 
 
 async def get_integration_config(

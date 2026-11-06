@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from src.services.supabase_service import SupabaseService
 from src.config.database import get_db
+from src.api.mcp_integration_base import IntegrationConfigUpdate, merge_editable_config
 from src.utils.response import success_response, error_response, map_status_to_error_code
 from src.schemas.responses import SuccessResponse, ErrorResponse
 from src.schemas.response_models import (
@@ -360,7 +361,7 @@ async def discover_tools(
 )
 async def save_configuration(
     agent_id: str,
-    config: Dict[str, Any],
+    config: IntegrationConfigUpdate,
     db: Session = Depends(get_db),
     service: SupabaseService = Depends(get_supabase_service),
     _permission: None = Depends(RequirePermission("integrations", "update")),
@@ -380,16 +381,7 @@ async def save_configuration(
             status_code=status.HTTP_404_NOT_FOUND
         )
 
-        # Get new config from request (remove 'connected' as it's computed, not stored)
-        new_config = config.get("config", {}).copy()
-        new_config.pop("connected", None)  # Remove 'connected' as it's computed from access_token
-
-        # Preserve sensitive fields that shouldn't be overwritten by frontend
-        sensitive_fields = ["access_token", "client_id", "client_secret", "refresh_token", "pkce_verifiers", "code_verifier"]
-        preserved_fields = {k: v for k, v in stored_config.items() if k in sensitive_fields and k not in new_config}
-
-        # Update configuration (merge with existing, preserving sensitive fields)
-        updated_config = {**stored_config, **new_config, **preserved_fields}
+        updated_config = merge_editable_config("supabase", stored_config, config.config)
 
         # Ensure connected is set correctly based on access_token
         updated_config["connected"] = bool(updated_config.get("access_token"))

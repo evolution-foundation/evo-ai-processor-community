@@ -566,7 +566,7 @@ class GoogleSheetsService:
         email: Optional[str] = None,
         db: Optional[Any] = None
     ) -> None:
-        """Store OAuth credentials directly to database or via evo-ai-core API."""
+        """Store OAuth credentials in the database."""
         credentials_data = {
             'token': credentials.token,
             'refresh_token': credentials.refresh_token,
@@ -579,26 +579,10 @@ class GoogleSheetsService:
             'connected': True
         }
 
-        if db:
-            from src.services.agent_service import upsert_agent_integration
-            success = await upsert_agent_integration(db, agent_id, "google_sheets_credentials", credentials_data)
-            if success:
-                logger.info("Successfully stored Google Sheets credentials directly to DB")
-            else:
-                logger.error("Failed to store Google Sheets credentials directly to DB")
-        else:
-            # Store credentials via evo-ai-core API
-            url = f"{self.core_service_url}/agents/{agent_id}/integrations"
+        from src.services.agent_service import write_integration_config
 
-            response = await self.http_client.post(
-                url,
-                json={
-                    "provider": "google_sheets_credentials",
-                    "config": credentials_data
-                }
-            )
-
-            response.raise_for_status()
+        await write_integration_config(db, agent_id, "google_sheets_credentials", credentials_data)
+        logger.info("Stored Google Sheets credentials in the database")
 
     async def _load_credentials(
         self,
