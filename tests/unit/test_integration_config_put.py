@@ -5,10 +5,16 @@ import inspect
 import json
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 import src.api.mcp_integration_base as mcp_integration_base
 import src.services.agent_service as agent_service
+from src.api.dependencies import get_current_user
+from src.api.mcp_integration_base import IntegrationConfigUpdate
+from src.config.database import get_db
+from src.middleware.permissions import PermissionChecker
 
 AGENT_ID = "0b6f7c1e-3f55-4a51-9a49-7d0d0c2b4a10"
 
@@ -37,7 +43,6 @@ STORED = {
     "client_secret": "stored-client-secret",
     "pkce_verifiers": {"state-1": "stored-verifier"},
     "oauth_metadata": {"token_endpoint": "https://auth.provider.example/token"},
-    "headers": {"Authorization": "Bearer stored-access"},
     "tools": ["search"],
 }
 
@@ -50,7 +55,6 @@ FORGED = {
     "code_verifier": "forged-verifier",
     "oauth_metadata": {"token_endpoint": "https://attacker.example/token"},
     "mcp_url": "https://attacker.example/mcp",
-    "headers": {"Authorization": "Bearer forged-access"},
     "expires_at": "2099-01-01T00:00:00",
     "connected": False,
 }
@@ -89,7 +93,7 @@ async def _put(provider, body):
     endpoint = _put_endpoint(provider)
     kwargs = {
         "agent_id": AGENT_ID,
-        "config": {"config": body},
+        "config": IntegrationConfigUpdate(config=body),
         "db": object(),
         "service": _Service(),
         "_permission": None,
@@ -129,8 +133,24 @@ async def test_put_saves_the_editable_fields(provider, saved):
 
 
 @pytest.mark.parametrize("provider", MCP_PROVIDERS)
-def test_every_put_provider_has_a_closed_field_list(provider):
-    assert mcp_integration_base.EDITABLE_CONFIG_FIELDS[provider] == ("tools",)
+@pytest.mark.parametrize("malformed", [["tools"], "tools", None])
+def test_put_rejects_a_config_that_is_not_an_object(provider, malformed, saved):
+    module = importlib.import_module(f"src.api.{provider}_routes")
+    app = FastAPI()
+    app.include_router(module.router)
+    app.dependency_overrides[get_current_user] = lambda: {}
+    app.dependency_overrides[get_db] = lambda: object()
+    for route in module.router.routes:
+        for dep in route.dependant.dependencies:
+            if isinstance(dep.call, PermissionChecker):
+                app.dependency_overrides[dep.call] = lambda: None
+            elif getattr(dep.call, "__name__", "") == f"get_{provider}_service":
+                app.dependency_overrides[dep.call] = _Service
+
+    response = TestClient(app).put(f"/agents/{AGENT_ID}/integrations/{provider}", json={"config": malformed})
+
+    assert response.status_code == 422
+    assert saved == []
 
 
 class _GoogleService:
