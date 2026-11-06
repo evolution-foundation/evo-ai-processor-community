@@ -27,6 +27,8 @@
 └──────────────────────────────────────────────────────────────────────────────┘
 """
 
+from contextlib import contextmanager
+
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from fastapi import HTTPException, status
@@ -385,6 +387,46 @@ async def upsert_agent_integration(
         logger.error(f"Error upserting agent integration: {e}")
         db.rollback()
         return False
+
+
+@contextmanager
+def _session_or_new(db: Optional[Session]):
+    if db is not None:
+        yield db
+        return
+    from src.config.database import SessionLocal
+
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def read_integration_config(
+    db: Optional[Session], agent_id: Union[uuid.UUID, str], provider: str
+) -> Dict[str, Any]:
+    """Stored config of one provider, {} when there is none; a database error raises instead of reading as empty."""
+    from sqlalchemy import text
+
+    with _session_or_new(db) as session:
+        row = session.execute(
+            text(
+                "SELECT config FROM evo_core_agent_integrations "
+                "WHERE agent_id = :agent_id AND provider = :provider"
+            ),
+            {"agent_id": str(agent_id), "provider": provider},
+        ).fetchone()
+    return dict(row[0] or {}) if row else {}
+
+
+async def write_integration_config(
+    db: Optional[Session], agent_id: Union[uuid.UUID, str], provider: str, config: Dict[str, Any]
+) -> None:
+    """Write OAuth state straight to the database; the core API ignores OAuth fields sent by clients."""
+    with _session_or_new(db) as session:
+        if not await upsert_agent_integration(session, agent_id, provider, config):
+            raise RuntimeError(f"Could not store the {provider} integration config")
 
 
 async def get_agent(db: Session, agent_id: Union[uuid.UUID, str]) -> Optional[Agent]:
