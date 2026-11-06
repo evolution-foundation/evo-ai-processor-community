@@ -265,15 +265,8 @@ async def get_configuration(
             return await service._load_credentials(ag_id)
         return None
 
-    configuration = await get_configuration_endpoint(
+    return await get_configuration_endpoint(
         agent_id, "github", db, load_from_service
-    )
-    if configuration.status_code >= 400:
-        return configuration
-
-    return success_response(
-        data=configuration,
-        message="Configuration retrieved successfully"
     )
 
 @router.get(

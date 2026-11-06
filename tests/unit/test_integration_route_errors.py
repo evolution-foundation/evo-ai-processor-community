@@ -16,6 +16,7 @@ MARKER = "upstream-detail-7f3a"
 MCP_PROVIDERS = [
     "asana",
     "atlassian",
+    "canva",
     "github",
     "hubspot",
     "linear",
@@ -90,6 +91,36 @@ def test_config_read_failure_is_a_generic_500(provider):
         AsyncMock(side_effect=RuntimeError(MARKER)),
     ):
         response = client.get(base)
+
+    _assert_error(response, 500)
+
+
+@pytest.mark.parametrize("provider", MCP_PROVIDERS)
+def test_config_read_returns_the_sanitized_config(provider):
+    client, base = _client(provider, FakeService())
+
+    stored = {"access_token": MARKER, "tools": ["list_issues"]}
+    with patch(
+        "src.api.mcp_integration_base.get_agent_integrations",
+        AsyncMock(return_value=[{"provider": provider, "config": stored}]),
+    ):
+        response = client.get(base)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["connected"] is True
+    assert data["tools"] == ["list_issues"]
+    assert MARKER not in response.text
+
+
+def test_listing_all_configs_failure_is_a_generic_500():
+    client, base = _client("integrations", FakeService())
+
+    with patch(
+        "src.services.agent_service.get_agent_integrations",
+        AsyncMock(side_effect=RuntimeError(MARKER)),
+    ):
+        response = client.get(base, headers={"Authorization": "Bearer t"})
 
     _assert_error(response, 500)
 
